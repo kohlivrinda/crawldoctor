@@ -20,6 +20,10 @@ class RateLimiter:
     def _init_redis(self):
         """Initialize Redis connection."""
         try:
+            if settings.redis_url.startswith("memory://"):
+                logger.info("Redis disabled; using memory-based rate limiting")
+                self.redis_client = None
+                return
             self.redis_client = redis.from_url(
                 settings.redis_url,
                 decode_responses=True,

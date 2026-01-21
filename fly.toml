@@ -19,7 +19,7 @@ kill_timeout = 10
     soft_limit = 150
 
 [[vm]]
-  memory = "4gb"
+  memory = "8gb"
   cpu_kind = "shared"
   cpus = 4
 
@@ -29,7 +29,6 @@ kill_timeout = 10
   CRAWLDOCTOR_API_HOST = "0.0.0.0"
   CRAWLDOCTOR_API_PORT = "8000"
   CRAWLDOCTOR_CORS_ORIGINS = '["https://crawldoctor.fly.dev"]'
-  CRAWLDOCTOR_REDIS_URL = "memory://localhost"
   CRAWLDOCTOR_ENABLE_METRICS = "true"
   CRAWLDOCTOR_ADMIN_USERNAME = "admin"
   CRAWLDOCTOR_ADMIN_EMAIL = "admin@crawldoctor.fly.dev"

@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tracking Test Page</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            padding: 20px;
+            line-height: 1.6;
+        }
+
+        section {
+            margin-bottom: 40px;
+            padding: 20px;
+            border: 1px solid #ccc;
+            border-radius: 8px;
+        }
+
+        button {
+            padding: 10px 20px;
+            cursor: pointer;
+        }
+
+        .spacer {
+            height: 150vh;
+            background: linear-gradient(to bottom, #f0f0f0, #ccc);
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Tracking Test Page</h1>
+
+    <section>
+        <h2>Click Tracking</h2>
+        <button id="btn-click-me" class="track-me">Click Me</button>
+        <a href="#somewhere" id="link-click-me">Link Test</a>
+    </section>
+
+    <section>
+        <h2>Form Tracking</h2>
+        <form id="test-form" action="/submit-fake" method="POST">
+            <div>
+                <label for="name">Name:</label>
+                <input type="text" id="name" name="name" placeholder="Enter name">
+            </div>
+            <div>
+                <label for="email">Email:</label>
+                <input type="email" id="email" name="email" placeholder="Enter email">
+            </div>
+            <div>
+                <label for="password">Password (Should be masked):</label>
+                <input type="password" id="password" name="password">
+            </div>
+            <button type="submit">Submit Form</button>
+        </form>
+    </section>
+
+    <section>
+        <h2>Scroll Tracking</h2>
+        <p>Scroll down to trigger scroll events.</p>
+        <div class="spacer"></div>
+        <p>You reached the bottom!</p>
+    </section>
+
+    <!-- Tracking Script -->
+    <script src="http://localhost:8001/track/js?tid=test-local-debug"></script>
+</body>
+
+</html>

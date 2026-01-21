@@ -63,6 +63,54 @@ export const analyticsAPI = {
     return response.data;
   },
 
+  getFunnelSummary: async (startDate?: string, endDate?: string) => {
+    const params = new URLSearchParams();
+    if (startDate) params.append('start_date', startDate);
+    if (endDate) params.append('end_date', endDate);
+    const response = await apiClient.get(`/api/v1/analytics/funnels?${params.toString()}`);
+    return response.data;
+  },
+
+  getFunnelConfig: async () => {
+    const response = await apiClient.get('/api/v1/analytics/funnels/config');
+    return response.data;
+  },
+
+  saveFunnelConfig: async (config: any) => {
+    const response = await apiClient.put('/api/v1/analytics/funnels/config', config);
+    return response.data;
+  },
+
+  getFunnelTiming: async (funnelKey: string, startDate?: string, endDate?: string) => {
+    const params = new URLSearchParams();
+    if (startDate) params.append('start_date', startDate);
+    if (endDate) params.append('end_date', endDate);
+    const response = await apiClient.get(`/api/v1/analytics/funnels/${funnelKey}/timing?${params.toString()}`);
+    return response.data;
+  },
+
+  getFunnelDropoffs: async (funnelKey: string, step: number, limit: number = 50, offset: number = 0, startDate?: string, endDate?: string) => {
+    const params = new URLSearchParams();
+    params.append('step', String(step));
+    params.append('limit', String(limit));
+    params.append('offset', String(offset));
+    if (startDate) params.append('start_date', startDate);
+    if (endDate) params.append('end_date', endDate);
+    const response = await apiClient.get(`/api/v1/analytics/funnels/${funnelKey}/dropoffs?${params.toString()}`);
+    return response.data;
+  },
+
+  getFunnelStageUsers: async (funnelKey: string, step: number, limit: number = 50, offset: number = 0, startDate?: string, endDate?: string) => {
+    const params = new URLSearchParams();
+    params.append('step', String(step));
+    params.append('limit', String(limit));
+    params.append('offset', String(offset));
+    if (startDate) params.append('start_date', startDate);
+    if (endDate) params.append('end_date', endDate);
+    const response = await apiClient.get(`/api/v1/analytics/funnels/${funnelKey}/stage-users?${params.toString()}`);
+    return response.data;
+  },
+
   getPageAnalytics: async (startDate?: string, endDate?: string) => {
     const params = new URLSearchParams();
     if (startDate) params.append('start_date', startDate);
@@ -144,11 +192,10 @@ export const analyticsAPI = {
     return response.data;
   },
 
-  listJourneys: async (targetPath?: string, withCapturedOnly: boolean = false, withNetworkData: boolean = false, startDate?: string, endDate?: string, limit: number = 50, offset: number = 0) => {
+  listJourneys: async (targetPath?: string, withCapturedOnly: boolean = false, startDate?: string, endDate?: string, limit: number = 50, offset: number = 0) => {
     const params = new URLSearchParams();
     if (targetPath) params.append('target_path', targetPath);
     if (withCapturedOnly) params.append('with_captured_only', 'true');
-    if (withNetworkData) params.append('with_network_data', 'true');
     if (startDate) params.append('start_date', startDate);
     if (endDate) params.append('end_date', endDate);
     params.append('limit', String(limit));
@@ -157,17 +204,49 @@ export const analyticsAPI = {
     return response.data;
   },
 
-  exportJourneysCSV: async (targetPath?: string, withCapturedOnly: boolean = false, withNetworkData: boolean = false, startDate?: string, endDate?: string) => {
+  exportJourneysCSV: async (targetPath?: string, withCapturedOnly: boolean = false, startDate?: string, endDate?: string) => {
     const params = new URLSearchParams();
     if (targetPath) params.append('target_path', targetPath);
     if (withCapturedOnly) params.append('with_captured_only', 'true');
-    if (withNetworkData) params.append('with_network_data', 'true');
     if (startDate) params.append('start_date', startDate);
     if (endDate) params.append('end_date', endDate);
     const response = await apiClient.get(`/api/v1/analytics/journeys/export?${params.toString()}`, {
       responseType: 'blob'
     });
     return response;
+  },
+
+  exportLeadsCSV: async (capturedPath?: string, source?: string, medium?: string, campaign?: string, startDate?: string, endDate?: string) => {
+    const params = new URLSearchParams();
+    if (capturedPath) params.append('captured_path', capturedPath);
+    if (source) params.append('source', source);
+    if (medium) params.append('medium', medium);
+    if (campaign) params.append('campaign', campaign);
+    if (startDate) params.append('start_date', startDate);
+    if (endDate) params.append('end_date', endDate);
+    const response = await apiClient.get(`/api/v1/analytics/leads/export?${params.toString()}`, {
+      responseType: 'blob'
+    });
+    return response;
+  },
+
+  listLeads: async (capturedPath?: string, startDate?: string, endDate?: string, limit: number = 50, offset: number = 0, source?: string, medium?: string, campaign?: string) => {
+    const params = new URLSearchParams();
+    if (capturedPath) params.append('captured_path', capturedPath);
+    if (source) params.append('source', source);
+    if (medium) params.append('medium', medium);
+    if (campaign) params.append('campaign', campaign);
+    if (startDate) params.append('start_date', startDate);
+    if (endDate) params.append('end_date', endDate);
+    params.append('limit', String(limit));
+    params.append('offset', String(offset));
+    const response = await apiClient.get(`/api/v1/analytics/leads?${params.toString()}`);
+    return response.data;
+  },
+
+  getLeadDetail: async (clientId: string, limit: number = 200, offset: number = 0) => {
+    const response = await apiClient.get(`/api/v1/analytics/leads/${clientId}?limit=${limit}&offset=${offset}`);
+    return response.data;
   },
 };
 

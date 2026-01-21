@@ -2,24 +2,48 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useQuery } from 'react-query';
 import { analyticsAPI } from '../utils/api';
 
-const formatDuration = (seconds?: number | null) => {
-  if (!seconds && seconds !== 0) return '—';
-  const s = Math.max(0, Math.floor(seconds));
-  const hours = Math.floor(s / 3600);
-  const minutes = Math.floor((s % 3600) / 60);
-  const secs = s % 60;
-  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
-};
-
-// Helper to get date 7 days ago
+// Helper to get date 30 days ago
 const getDefaultStartDate = () => {
   const date = new Date();
-  date.setDate(date.getDate() - 7);
+  date.setDate(date.getDate() - 30);
   return date.toISOString().split('T')[0];
 };
 
 const getDefaultEndDate = () => {
   return new Date().toISOString().split('T')[0];
+};
+
+const DataValue: React.FC<{ value: any }> = ({ value }) => {
+  if (value === null || value === undefined) return <span>—</span>;
+  if (typeof value === 'object') {
+    return <pre className="text-xs bg-gray-50 p-2 rounded overflow-auto">{JSON.stringify(value, null, 2)}</pre>;
+  }
+  
+  const str = String(value);
+  
+  // Try to detect and parse JSON string
+  if (str.trim().startsWith('{') || str.trim().startsWith('[')) {
+    try {
+      const parsed = JSON.parse(str);
+      return <pre className="text-xs bg-gray-50 p-2 rounded overflow-auto">{JSON.stringify(parsed, null, 2)}</pre>;
+    } catch (e) {}
+  }
+  
+  // Try to detect pipe-separated key-value pairs
+  if (str.includes('|') && str.includes(':')) {
+    const parts = str.split('|').map(p => p.trim());
+    return (
+      <div className="space-y-1">
+        {parts.map((p, i) => (
+          <div key={i} className="text-xs border-b border-gray-100 last:border-0 pb-1">
+            {p}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  return <span className="break-words">{str}</span>;
 };
 
 const Journeys: React.FC = () => {
@@ -28,7 +52,6 @@ const Journeys: React.FC = () => {
   const [targetPathInput, setTargetPathInput] = useState('');
   const [targetPath, setTargetPath] = useState<string>('');
   const [withCapturedOnly, setWithCapturedOnly] = useState(false);
-  const [withNetworkData, setWithNetworkData] = useState(false);
   
   // Input states (what user is typing/selecting)
   const [startDateInput, setStartDateInput] = useState<string>(getDefaultStartDate());
@@ -44,14 +67,29 @@ const Journeys: React.FC = () => {
   const journeyPageSize = 200;
 
   const { data: journeys, isLoading } = useQuery(
-    ['journeys', targetPath, withCapturedOnly, withNetworkData, startDate, endDate, currentPage, pageSize],
-    () => analyticsAPI.listJourneys(targetPath || undefined, withCapturedOnly, withNetworkData, startDate, endDate, pageSize, (currentPage - 1) * pageSize),
+    ['journeys', targetPath, withCapturedOnly, startDate, endDate, currentPage, pageSize],
+    () => analyticsAPI.listJourneys(targetPath || undefined, withCapturedOnly, startDate, endDate, pageSize, (currentPage - 1) * pageSize),
     { refetchInterval: 60000 }
   );
 
   const { data: journeyDetail, isLoading: journeyDetailLoading, error: journeyDetailError } = useQuery(
     ['journey-detail', selectedClientId, journeyPage],
-    () => selectedClientId ? analyticsAPI.getJourneyTimeline(selectedClientId, journeyPageSize, (journeyPage - 1) * journeyPageSize) : Promise.resolve(null),
+    async () => {
+      if (!selectedClientId) return null;
+      // Find if this journey has captured data in the list
+      const journey = journeys?.journeys?.find((j: any) => j.client_id === selectedClientId);
+      
+      if (journey?.has_captured_data) {
+        try {
+          return await analyticsAPI.getLeadDetail(selectedClientId, journeyPageSize, (journeyPage - 1) * journeyPageSize);
+        } catch (e) {
+          console.warn("Failed to fetch lead detail, falling back to journey timeline", e);
+        }
+      }
+      
+      const timeline = await analyticsAPI.getJourneyTimeline(selectedClientId, journeyPageSize, (journeyPage - 1) * journeyPageSize);
+      return { journey: timeline };
+    },
     { enabled: !!selectedClientId }
   );
 
@@ -72,7 +110,6 @@ const Journeys: React.FC = () => {
       const response = await analyticsAPI.exportJourneysCSV(
         targetPath || undefined,
         withCapturedOnly,
-        withNetworkData,
         startDate,
         endDate
       );
@@ -107,7 +144,7 @@ const Journeys: React.FC = () => {
     <div className="space-y-6">
       <div className="space-y-4">
         <div className="flex justify-between items-center">
-          <h1 className="text-3xl font-bold text-gray-900">Journeys</h1>
+          <h1 className="text-3xl font-bold text-gray-900">Journeys <span className="text-xs font-normal text-gray-400">v1.1</span></h1>
           <select
             value={pageSize}
             onChange={(e) => { setPageSize(Number(e.target.value)); setCurrentPage(1); }}
@@ -184,15 +221,7 @@ const Journeys: React.FC = () => {
               />
               <span>Only with captured data</span>
             </label>
-            <label className="flex items-center space-x-2 text-sm text-gray-700">
-              <input
-                type="checkbox"
-                checked={withNetworkData}
-                onChange={(e) => { setWithNetworkData(e.target.checked); setCurrentPage(1); }}
-              />
-              <span>Only with network data</span>
-            </label>
-            {(withCapturedOnly || withNetworkData || targetPath) && (
+            {(withCapturedOnly || targetPath) && (
               <span className="text-sm text-gray-500 italic">
                 {summaryLabel}
               </span>
@@ -211,75 +240,59 @@ const Journeys: React.FC = () => {
             <thead className="bg-gray-50">
               <tr>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Client</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Captured Data</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Source (First Touch)</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Campaign</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Path Journey</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Referrer</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Captured Data</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">First Seen</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Seen</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Duration</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Timeline</th>
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
               {journeys?.journeys?.map((j: any) => (
-                <tr key={j.client_id}>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                <tr key={j.client_id} className={j.has_captured_data ? 'bg-green-50' : ''}>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 font-mono">
                     {j.client_id?.slice(0, 8)}...
                   </td>
-                  <td className="px-6 py-4 text-sm text-gray-900 max-w-xl">
-                    {(j.captured_data || j.email || j.name) ? (
-                      <div className="space-y-1">
-                        {(j.email || j.name) && (
-                          <div>
-                            {j.email ? `email: ${j.email}` : ''}
-                            {j.email && j.name ? ' | ' : ''}
-                            {j.name ? `name: ${j.name}` : ''}
-                          </div>
-                        )}
-                        {j.captured_data && (
-                          <div 
-                            className="text-xs text-gray-700 break-words truncate max-w-xl" 
-                            title={j.captured_data}
-                            style={{ maxWidth: '400px' }}
-                          >
-                            {j.captured_data.length > 100 ? `${j.captured_data.slice(0, 100)}...` : j.captured_data}
-                          </div>
-                        )}
-                      </div>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${j.source === 'direct' ? 'bg-gray-100 text-gray-800' : 'bg-blue-100 text-blue-800'}`}>
+                      {j.source}
+                    </span>
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 italic">
+                    {j.campaign || '—'}
+                  </td>
+                  <td className="px-6 py-4 text-sm text-gray-900 max-w-md">
+                    <div
+                      className="break-words truncate"
+                      title={j.entry_page}
+                    >
+                      {j.entry_page?.replace(/^https?:\/\/[^/]+/, '')} → ... → {j.exit_page?.replace(/^https?:\/\/[^/]+/, '')}
+                    </div>
+                    <div className="text-xs text-gray-400 mt-1">{j.visit_count} page views</div>
+                  </td>
+                  <td className="px-6 py-4 text-sm text-gray-900">
+                    {j.has_captured_data ? (
+                      <button 
+                        type="button"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          console.log('Pill clicked for:', j.client_id);
+                          setSelectedClientId(j.client_id);
+                        }}
+                        className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-green-100 text-green-800 hover:bg-green-200 cursor-pointer border border-green-300 shadow-sm transition-colors"
+                      >
+                        Conversion Captured
+                      </button>
                     ) : '—'}
                   </td>
-                  <td className="px-6 py-4 text-sm text-gray-900 max-w-2xl">
-                    <div
-                      className="break-words"
-                      title={j.path_sequence || ''}
-                      style={{
-                        display: '-webkit-box',
-                        WebkitLineClamp: 2,
-                        WebkitBoxOrient: 'vertical',
-                        overflow: 'hidden',
-                      }}
-                    >
-                      {j.path_sequence || '—'}
-                    </div>
-                  </td>
-                  <td className="px-6 py-4 text-sm text-gray-900 max-w-xs">
-                    <div className="break-words">
-                      {j.first_referrer || '—'}
-                      {j.first_referrer_domain ? ` (${j.first_referrer_domain})` : ''}
-                    </div>
-                  </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                    {j.first_seen ? new Date(j.first_seen).toLocaleString() : '—'}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                    {j.last_seen ? new Date(j.last_seen).toLocaleString() : '—'}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                    {formatDuration(j.duration_seconds)}
+                    {j.first_seen ? new Date(j.first_seen).toLocaleDateString() : '—'}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-blue-700">
-                    <button className="underline" onClick={() => setSelectedClientId(j.client_id)}>
-                      View
+                    <button className="underline font-medium hover:text-blue-900" onClick={() => setSelectedClientId(j.client_id)}>
+                      Review Journey
                     </button>
                   </td>
                 </tr>
@@ -324,14 +337,14 @@ const Journeys: React.FC = () => {
               <div className="flex items-center space-x-3">
                 <button
                   onClick={() => setJourneyPage(Math.max(1, journeyPage - 1))}
-                  disabled={!journeyDetail?.has_prev}
+                  disabled={!journeyDetail?.journey?.has_prev}
                   className="px-3 py-1 text-sm rounded-md bg-white border border-gray-300 text-gray-700 disabled:opacity-50"
                 >
                   Prev
                 </button>
                 <button
                   onClick={() => setJourneyPage(journeyPage + 1)}
-                  disabled={!journeyDetail?.has_next}
+                  disabled={!journeyDetail?.journey?.has_next}
                   className="px-3 py-1 text-sm rounded-md bg-white border border-gray-300 text-gray-700 disabled:opacity-50"
                 >
                   Next
@@ -345,10 +358,31 @@ const Journeys: React.FC = () => {
               <div className="p-4 text-sm text-red-600">Failed to load timeline.</div>
             ) : journeyDetail ? (
               <div className="space-y-4 max-h-[70vh] overflow-y-auto">
-                {(journeyDetail.timeline || []).length === 0 ? (
+                {journeyDetail.latest_capture && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                    <div className="border rounded p-3 bg-green-50">
+                      <div className="text-xs font-bold text-green-700 uppercase mb-1">Captured Values</div>
+                      <div className="bg-white p-2 rounded border border-green-100 min-h-[50px]">
+                        <DataValue value={journeyDetail.latest_capture?.form_values} />
+                      </div>
+                    </div>
+                    {journeyDetail.url_params && Object.keys(journeyDetail.url_params).length > 0 && (
+                      <div className="border rounded p-3 bg-blue-50">
+                        <div className="text-xs font-bold text-blue-700 uppercase mb-1">URL Params</div>
+                        <div className="bg-white p-2 rounded border border-blue-100 min-h-[50px]">
+                          <DataValue value={journeyDetail.url_params} />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <h4 className="text-sm font-semibold text-gray-700 border-b pb-1">Event Timeline</h4>
+                
+                {(journeyDetail.journey?.timeline || []).length === 0 ? (
                   <div className="p-4 text-sm text-gray-500">No timeline items for this user yet.</div>
                 ) : (
-                  journeyDetail.timeline.map((item: any) => (
+                  (journeyDetail.journey?.timeline || []).map((item: any) => (
                     <div key={`${item.type}-${item.id}`} className="border rounded p-3">
                       <div className="text-xs text-gray-500">{item.timestamp ? new Date(item.timestamp).toLocaleString() : '—'}</div>
                       <div className="flex items-center space-x-2">

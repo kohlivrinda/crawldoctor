@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { analyticsAPI } from '../utils/api';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 
 const COLORS = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#F97316'];
 
@@ -89,7 +89,18 @@ const Dashboard: React.FC = () => {
     }
   );
 
-  const { data: pageAnalytics, isLoading: pageLoading, error: pageError } = useQuery(
+  const { data: funnelSummary, isLoading: funnelLoading } = useQuery(
+    ['funnel-summary', startDate, endDate],
+    () => analyticsAPI.getFunnelSummary(startDate, endDate),
+    {
+      refetchInterval: 60000,
+      retry: 2,
+      retryDelay: 1000,
+    }
+  );
+
+
+  const { data: pageAnalytics, error: pageError } = useQuery(
     ['page-analytics', startDate, endDate],
     () => analyticsAPI.getPageAnalytics(startDate, endDate),
     { 
@@ -100,7 +111,7 @@ const Dashboard: React.FC = () => {
     }
   );
 
-  const { data: recentActivity, isLoading: activityLoading, error: activityError } = useQuery(
+  const { data: recentActivity, error: activityError } = useQuery(
     ['recent-activity', currentPage, pageSize, startDate, endDate],
     () => analyticsAPI.getRecentActivity(pageSize, (currentPage - 1) * pageSize, startDate, endDate),
     { 
@@ -113,7 +124,7 @@ const Dashboard: React.FC = () => {
 
   // Session data moved to Sessions page
 
-  const { data: categories, isLoading: categoriesLoading, error: categoriesError } = useQuery(
+  const { data: categories, error: categoriesError } = useQuery(
     ['visitor-categories', startDate, endDate],
     () => analyticsAPI.getVisitorCategories(startDate, endDate),
     { 
@@ -180,6 +191,7 @@ const Dashboard: React.FC = () => {
     }
   });
 
+
   const handleExport = () => {
     exportMutation.mutate();
   };
@@ -187,6 +199,7 @@ const Dashboard: React.FC = () => {
   const handleDeleteAll = () => {
     deleteMutation.mutate();
   };
+
 
   // Show errors if any critical queries fail
   if (summaryError || pageError || activityError || categoriesError) {
@@ -209,7 +222,6 @@ const Dashboard: React.FC = () => {
   }
 
   // Show partial loading state - don't block entire dashboard
-  const anyLoading = summaryLoading || pageLoading || activityLoading || categoriesLoading;
 
   return (
     <div className="p-6 space-y-6">
@@ -251,46 +263,44 @@ const Dashboard: React.FC = () => {
       </div>
 
       {/* Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-        <div className="bg-white p-6 rounded-lg shadow">
-          <h3 className="text-lg font-semibold text-gray-700">Total Visits</h3>
-          <p className="text-3xl font-bold text-blue-600">
-            {summaryLoading ? (
-              <span className="animate-pulse bg-gray-200 rounded w-16 h-8 inline-block"></span>
-            ) : (
-              visitorSummary?.total_visits || 0
-            )}
+      <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-6">
+        <div className="bg-white p-6 rounded-lg shadow border-l-4 border-blue-500">
+          <h3 className="text-sm font-semibold text-gray-500 uppercase">Total Visits</h3>
+          <p className="text-2xl font-bold text-gray-900 mt-1">
+            {summaryLoading ? '...' : (visitorSummary?.total_visits || 0).toLocaleString()}
           </p>
         </div>
-        <div className="bg-white p-6 rounded-lg shadow">
-          <h3 className="text-lg font-semibold text-gray-700">Unique Visitors</h3>
-          <p className="text-3xl font-bold text-green-600">
-            {summaryLoading ? (
-              <span className="animate-pulse bg-gray-200 rounded w-16 h-8 inline-block"></span>
-            ) : (
-              visitorSummary?.unique_visitors || 0
-            )}
+        <div className="bg-white p-6 rounded-lg shadow border-l-4 border-green-500">
+          <h3 className="text-sm font-semibold text-gray-500 uppercase">Unique Visitors</h3>
+          <p className="text-2xl font-bold text-gray-900 mt-1">
+            {summaryLoading ? '...' : (visitorSummary?.unique_visitors || 0).toLocaleString()}
           </p>
         </div>
-        <div className="bg-white p-6 rounded-lg shadow">
-          <h3 className="text-lg font-semibold text-gray-700">AI Crawlers</h3>
-          <p className="text-3xl font-bold text-orange-600">
-            {summaryLoading ? (
-              <span className="animate-pulse bg-gray-200 rounded w-16 h-8 inline-block"></span>
-            ) : (
-              visitorSummary?.visits_by_category?.find((c: any) => c.category === 'AI Crawlers')?.count || 0
-            )}
+        <div className="bg-white p-6 rounded-lg shadow border-l-4 border-indigo-500">
+          <h3 className="text-sm font-semibold text-gray-500 uppercase text-indigo-600">Conversions</h3>
+          <p className="text-2xl font-bold text-gray-900 mt-1">
+            {summaryLoading ? '...' : (visitorSummary?.conversions || 0).toLocaleString()}
           </p>
         </div>
-        <div className="bg-white p-6 rounded-lg shadow">
-          <h3 className="text-lg font-semibold text-gray-700">Human Visitors</h3>
-          <p className="text-3xl font-bold text-purple-600">
-            {summaryLoading ? (
-              <span className="animate-pulse bg-gray-200 rounded w-16 h-8 inline-block"></span>
-            ) : (
+        <div className="bg-white p-6 rounded-lg shadow border-l-4 border-yellow-500">
+          <h3 className="text-sm font-semibold text-gray-500 uppercase text-yellow-600">Conv. Rate</h3>
+          <p className="text-2xl font-bold text-gray-900 mt-1">
+            {summaryLoading ? '...' : `${visitorSummary?.conversion_rate || 0}%`}
+          </p>
+        </div>
+        <div className="bg-white p-6 rounded-lg shadow border-l-4 border-orange-500">
+          <h3 className="text-sm font-semibold text-gray-500 uppercase">AI Crawlers</h3>
+          <p className="text-2xl font-bold text-gray-900 mt-1">
+            {summaryLoading ? '...' : (visitorSummary?.visits_by_category?.find((c: any) => c.category === 'AI Crawlers')?.count || 0).toLocaleString()}
+          </p>
+        </div>
+        <div className="bg-white p-6 rounded-lg shadow border-l-4 border-purple-500">
+          <h3 className="text-sm font-semibold text-gray-500 uppercase">Human Visitors</h3>
+          <p className="text-2xl font-bold text-gray-900 mt-1">
+            {summaryLoading ? '...' : (
               (visitorSummary?.visits_by_category?.find((c: any) => c.category === 'Desktop Humans')?.count || 0) +
               (visitorSummary?.visits_by_category?.find((c: any) => c.category === 'Mobile Humans')?.count || 0)
-            )}
+            ).toLocaleString()}
           </p>
         </div>
       </div>
@@ -333,6 +343,84 @@ const Dashboard: React.FC = () => {
               <Bar dataKey="total_visits" fill="#3B82F6" />
             </BarChart>
           </ResponsiveContainer>
+        </div>
+      </div>
+
+      {/* Acquisition Insights */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="bg-white p-6 rounded-lg shadow">
+          <h3 className="text-xl font-semibold text-gray-800 mb-4">Top Sources</h3>
+          <div className="space-y-2">
+            {(visitorSummary?.top_sources || []).map((s: any) => (
+              <div key={s.source} className="flex items-center justify-between">
+                <span className="text-sm text-gray-700 font-medium">{s.source}</span>
+                <span className="text-sm text-gray-500">{s.count}</span>
+              </div>
+            ))}
+            {(!visitorSummary?.top_sources || visitorSummary.top_sources.length === 0) && (
+              <div className="text-sm text-gray-400">No source data available.</div>
+            )}
+          </div>
+        </div>
+
+        <div className="bg-white p-6 rounded-lg shadow">
+          <h3 className="text-xl font-semibold text-gray-800 mb-4">Top Campaigns</h3>
+          <div className="space-y-2">
+            {(visitorSummary?.top_campaigns || []).map((c: any) => (
+              <div key={c.campaign} className="flex items-center justify-between">
+                <span className="text-sm text-gray-700 font-medium truncate max-w-[200px]" title={c.campaign}>{c.campaign}</span>
+                <span className="text-sm text-gray-500">{c.count}</span>
+              </div>
+            ))}
+            {(!visitorSummary?.top_campaigns || visitorSummary.top_campaigns.length === 0) && (
+              <div className="text-sm text-gray-400">No campaign data available.</div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Funnel Insights */}
+      <div className="bg-white p-6 rounded-lg shadow">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-xl font-semibold text-gray-800">Conversion Funnels</h3>
+          {funnelLoading && <span className="text-sm text-gray-400">Loading...</span>}
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {(funnelSummary?.funnels || []).map((funnel: any) => (
+            <div key={funnel.key || funnel.label} className="border border-gray-200 rounded-lg p-4">
+              <div className="text-sm font-semibold text-gray-700 mb-3">{funnel.label}</div>
+              <div className="space-y-3">
+                {funnel.stages.map((stage: any, idx: number) => (
+                  <div key={`${funnel.key || funnel.label}-${idx}`}>
+                    <div className="flex justify-between text-xs text-gray-500">
+                      <span>{stage.label}</span>
+                      <span className="font-semibold text-gray-700">{stage.count}</span>
+                    </div>
+                    <div className="w-full bg-gray-100 rounded-full h-2 mt-1">
+                      <div
+                        className="h-2 rounded-full bg-blue-500"
+                        style={{
+                          width: funnel.stages[0]?.count ? `${Math.round((stage.count / funnel.stages[0].count) * 100)}%` : '0%'
+                        }}
+                      ></div>
+                    </div>
+                  </div>
+                ))}
+                <div className="pt-2 text-xs text-gray-600 space-y-1">
+                  {(funnel.rates || []).map((rate: any) => (
+                    <div key={rate.label} className="flex items-center justify-between">
+                      <span>{rate.label}</span>
+                      <span className="font-semibold">{rate.rate}%</span>
+                      <span className="text-gray-400">Drop-off: {rate.dropoff_count ?? 0}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ))}
+          {(!funnelSummary?.funnels || funnelSummary.funnels.length === 0) && (
+            <div className="text-sm text-gray-400">No funnel data available.</div>
+          )}
         </div>
       </div>
 
@@ -533,6 +621,7 @@ const Dashboard: React.FC = () => {
           </div>
         </div>
       )}
+
 
       {/* Delete Confirmation Modal */}
       {showDeleteConfirm && (

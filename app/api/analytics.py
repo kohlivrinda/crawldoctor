@@ -1,12 +1,13 @@
 """Simplified analytics API for visitor insights."""
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List
 from fastapi import APIRouter, Depends, Query, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 import structlog
 import csv
 import io
+from pydantic import BaseModel, Field
 
 from app.database import get_db
 from app.services.analytics import AnalyticsService
@@ -35,6 +36,176 @@ async def get_visitor_summary(
     except Exception as e:
         logger.error("Failed to get visitor summary", error=str(e))
         raise HTTPException(status_code=500, detail="Failed to get analytics")
+
+
+@router.get("/funnels")
+async def get_funnel_summary(
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get funnel summaries for key conversion paths."""
+    try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59) if end_date else None
+        config = analytics_service.get_funnel_config(db, current_user.id)
+        return analytics_service.get_funnel_summary(db, start_date=start_dt, end_date=end_dt, config=config)
+    except Exception as e:
+        logger.error("Failed to get funnel summary", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to get funnel summary")
+
+
+class FunnelStepConfig(BaseModel):
+    label: str
+    type: str = Field("page", pattern="^(page|event)$")
+    path: str
+    event_type: Optional[str] = "form_submit"
+
+
+class FunnelDefinition(BaseModel):
+    key: str
+    label: str
+    steps: List[FunnelStepConfig]
+
+
+class FunnelConfigPayload(BaseModel):
+    funnels: List[FunnelDefinition]
+
+
+@router.get("/funnels/config")
+async def get_funnel_config(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get funnel configuration for the current user."""
+    try:
+        return analytics_service.get_funnel_config(db, current_user.id)
+    except Exception as e:
+        logger.error("Failed to get funnel config", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to get funnel config")
+
+
+@router.put("/funnels/config")
+async def update_funnel_config(
+    payload: FunnelConfigPayload,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Update funnel configuration for the current user."""
+    try:
+        return analytics_service.save_funnel_config(db, current_user.id, payload.dict())
+    except Exception as e:
+        logger.error("Failed to update funnel config", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to update funnel config")
+
+
+@router.get("/funnels/{funnel_key}/timing")
+async def get_funnel_timing(
+    funnel_key: str,
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    max_rows: int = Query(5000, ge=100, le=50000, description="Max samples for timing stats"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get time-to-convert metrics for a funnel."""
+    try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59) if end_date else None
+        config = analytics_service.get_funnel_config(db, current_user.id)
+        data = analytics_service.get_funnel_time_metrics(
+            db,
+            funnel_key=funnel_key,
+            config=config,
+            start_date=start_dt,
+            end_date=end_dt,
+            max_rows=max_rows,
+        )
+        if data.get("error") == "not_found":
+            raise HTTPException(status_code=404, detail="Funnel not found")
+        return data
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to get funnel timing", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to get funnel timing")
+
+
+@router.get("/funnels/{funnel_key}/dropoffs")
+async def get_funnel_dropoffs(
+    funnel_key: str,
+    step: int = Query(0, ge=0, description="Step index to compute drop-offs after"),
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get users who dropped off after a given funnel step."""
+    try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59) if end_date else None
+        config = analytics_service.get_funnel_config(db, current_user.id)
+        data = analytics_service.get_funnel_dropoffs(
+            db,
+            funnel_key=funnel_key,
+            step_index=step,
+            config=config,
+            start_date=start_dt,
+            end_date=end_dt,
+            limit=limit,
+            offset=offset,
+        )
+        if data.get("error") == "not_found":
+            raise HTTPException(status_code=404, detail="Funnel not found")
+        if data.get("error") == "invalid_step":
+            raise HTTPException(status_code=400, detail="Invalid step index")
+        return data
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to get funnel dropoffs", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to get funnel dropoffs")
+
+
+@router.get("/funnels/{funnel_key}/stage-users")
+async def get_funnel_stage_users(
+    funnel_key: str,
+    step: int = Query(0, ge=0, description="Step index to list users who reached"),
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get users who reached a funnel stage with journey details."""
+    try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59) if end_date else None
+        config = analytics_service.get_funnel_config(db, current_user.id)
+        data = analytics_service.get_funnel_stage_users(
+            db,
+            funnel_key=funnel_key,
+            step_index=step,
+            config=config,
+            start_date=start_dt,
+            end_date=end_dt,
+            limit=limit,
+            offset=offset,
+        )
+        if data.get("error") == "not_found":
+            raise HTTPException(status_code=404, detail="Funnel not found")
+        if data.get("error") == "invalid_step":
+            raise HTTPException(status_code=400, detail="Invalid step index")
+        return data
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to get funnel stage users", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to get funnel stage users")
 
 
 @router.get("/pages")
@@ -164,7 +335,6 @@ async def get_unified_user_activity(
 async def list_journeys(
     target_path: Optional[str] = Query(None, description="Target path(s) to filter journeys. Supports exact match and subpaths (e.g., /demo matches /demo and /demo/*). Use comma-separated values for multiple paths (ALL must be present in journey)."),
     with_captured_only: bool = Query(False, description="Only include journeys with captured data"),
-    with_network_data: bool = Query(False, description="Only include journeys with network-captured form data"),
     start_date: Optional[str] = Query(None, description="Start date for date range filter (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="End date for date range filter (YYYY-MM-DD)"),
     limit: int = Query(50, ge=1, le=200, description="Number of journeys to return"),
@@ -174,13 +344,16 @@ async def list_journeys(
 ):
     """List journey summaries grouped by client_id with optional filters."""
     try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59) if end_date else None
+        if not start_dt and not end_dt:
+            start_dt = datetime.now() - timedelta(days=30)
         return analytics_service.list_journey_summaries(
             db,
             target_path=target_path,
             with_captured_only=with_captured_only,
-            with_network_data=with_network_data,
-            start_date=start_date,
-            end_date=end_date,
+            start_date=start_dt,
+            end_date=end_dt,
             limit=limit,
             offset=offset,
         )
@@ -194,7 +367,6 @@ async def list_journeys(
 async def export_journeys_csv(
     target_path: Optional[str] = Query(None, description="Target path(s) to filter journeys. Supports exact match and subpaths (e.g., /demo matches /demo and /demo/*). Use comma-separated values for multiple paths (ALL must be present in journey)."),
     with_captured_only: bool = Query(False, description="Only include journeys with captured data"),
-    with_network_data: bool = Query(False, description="Only include journeys with network-captured form data"),
     start_date: Optional[str] = Query(None, description="Start date for date range filter (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="End date for date range filter (YYYY-MM-DD)"),
     db: Session = Depends(get_db),
@@ -202,34 +374,39 @@ async def export_journeys_csv(
 ):
     """Export journeys as CSV with optional filters."""
     try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59) if end_date else None
+        
         def generate_csv():
             output = io.StringIO()
             writer = None
             first_row = True
-            for row in analytics_service.export_journey_summaries(
-                db,
-                target_path=target_path,
-                with_captured_only=with_captured_only,
-                with_network_data=with_network_data,
-                start_date=start_date,
-                end_date=end_date,
-            ):
-                if first_row:
-                    fieldnames = row.keys()
-                    writer = csv.DictWriter(output, fieldnames=fieldnames)
-                    writer.writeheader()
+            try:
+                for row in analytics_service.export_journey_summaries(
+                    db,
+                    target_path=target_path,
+                    with_captured_only=with_captured_only,
+                    start_date=start_dt,
+                    end_date=end_dt,
+                ):
+                    if first_row:
+                        fieldnames = row.keys()
+                        writer = csv.DictWriter(output, fieldnames=fieldnames)
+                        writer.writeheader()
+                        yield output.getvalue()
+                        output.truncate(0)
+                        output.seek(0)
+                        first_row = False
+                    if writer:
+                        writer.writerow(row)
+                        if output.tell() > 8192:
+                            yield output.getvalue()
+                            output.truncate(0)
+                            output.seek(0)
+                if output.tell() > 0:
                     yield output.getvalue()
-                    output.truncate(0)
-                    output.seek(0)
-                    first_row = False
-                writer.writerow(row)
-                if output.tell() > 8192:
-                    yield output.getvalue()
-                    output.truncate(0)
-                    output.seek(0)
-            if output.tell() > 0:
-                yield output.getvalue()
-            output.close()
+            finally:
+                output.close()
 
         filename = f"crawldoctor_journeys_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         return StreamingResponse(
@@ -240,6 +417,123 @@ async def export_journeys_csv(
     except Exception as e:
         logger.error("Failed to export journeys CSV", error=str(e))
         raise HTTPException(status_code=500, detail="Failed to export journeys")
+
+
+@router.get("/leads")
+async def list_leads(
+    captured_path: Optional[str] = Query(None, description="Filter by captured form path (e.g., /demo)"),
+    source: Optional[str] = Query(None, description="Filter by UTM source"),
+    medium: Optional[str] = Query(None, description="Filter by UTM medium"),
+    campaign: Optional[str] = Query(None, description="Filter by UTM campaign"),
+    start_date: Optional[str] = Query(None, description="Start date for date range filter (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date for date range filter (YYYY-MM-DD)"),
+    limit: int = Query(50, ge=1, le=200, description="Number of leads to return"),
+    offset: int = Query(0, ge=0, description="Number of leads to skip"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List captured leads with summary details."""
+    try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59) if end_date else None
+        if not start_dt and not end_dt:
+            start_dt = datetime.now() - timedelta(days=30)
+        return analytics_service.list_leads(
+            db,
+            captured_path=captured_path,
+            source=source,
+            medium=medium,
+            campaign=campaign,
+            start_date=start_dt,
+            end_date=end_dt,
+            limit=limit,
+            offset=offset,
+        )
+    except Exception as e:
+        logger.error("Failed to list leads", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to list leads")
+
+
+@router.get("/leads/export")
+@router.get("/leads/export.csv")
+async def export_leads_csv(
+    captured_path: Optional[str] = Query(None, description="Filter by captured form path (e.g., /demo)"),
+    source: Optional[str] = Query(None, description="Filter by UTM source"),
+    medium: Optional[str] = Query(None, description="Filter by UTM medium"),
+    campaign: Optional[str] = Query(None, description="Filter by UTM campaign"),
+    start_date: Optional[str] = Query(None, description="Start date for date range filter (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date for date range filter (YYYY-MM-DD)"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Export captured leads as CSV with optional filters."""
+    try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59) if end_date else None
+        
+        def generate_csv():
+            output = io.StringIO()
+            writer = None
+            first_row = True
+            try:
+                for row in analytics_service.export_leads(
+                    db,
+                    captured_path=captured_path,
+                    source=source,
+                    medium=medium,
+                    campaign=campaign,
+                    start_date=start_dt,
+                    end_date=end_dt,
+                ):
+                    if first_row:
+                        fieldnames = row.keys()
+                        writer = csv.DictWriter(output, fieldnames=fieldnames)
+                        writer.writeheader()
+                        yield output.getvalue()
+                        output.truncate(0)
+                        output.seek(0)
+                        first_row = False
+                    if writer:
+                        writer.writerow(row)
+                        if output.tell() > 8192:
+                            yield output.getvalue()
+                            output.truncate(0)
+                            output.seek(0)
+                if output.tell() > 0:
+                    yield output.getvalue()
+            finally:
+                output.close()
+
+        filename = f"crawldoctor_leads_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        return StreamingResponse(
+            generate_csv(),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
+    except Exception as e:
+        logger.error("Failed to export leads CSV", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to export leads")
+
+
+@router.get("/leads/{client_id}")
+async def get_lead_detail(
+    client_id: str,
+    limit: int = Query(200, ge=1, le=1000, description="Number of timeline items to return"),
+    offset: int = Query(0, ge=0, description="Number of items to skip"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get detailed lead info including journey timeline."""
+    try:
+        data = analytics_service.get_lead_detail(db, client_id, limit=limit, offset=offset)
+        if data.get("error"):
+            raise HTTPException(status_code=404, detail=data["error"])
+        return data
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to get lead detail", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to get lead detail")
 
 
 @router.get("/journeys/{client_id}")

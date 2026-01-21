@@ -10,6 +10,7 @@ from sqlalchemy import func
 import structlog
 
 from app.models.visit import Visit, VisitSession, VisitEvent
+from app.models.summary import LeadSummary, JourneySummary
 from app.services.crawler_detection import CrawlerDetectionService, CrawlerDetectionResult
 from app.services.event_batcher import event_batcher
 from app.services.geo import GeoLocationService
@@ -324,6 +325,13 @@ class TrackingService:
         db.commit()
         db.refresh(visit)
         
+        # Real-time summary update
+        if client_id:
+            try:
+                self._update_summaries(db, client_id)
+            except Exception as e:
+                logger.error("Failed to update summaries", client_id=client_id, error=str(e))
+
         # Log the visit with full details
         logger.info(
             "Visit tracked",
@@ -835,6 +843,13 @@ class TrackingService:
             db.commit()
             db.refresh(event)
             event_id = event.id
+            
+            # Real-time summary update
+            if client_id:
+                try:
+                    self._update_summaries(db, client_id)
+                except Exception as e:
+                    logger.error("Failed to update summaries on event", client_id=client_id, error=str(e))
 
         # If we created or linked a visit, opportunistically backfill visit geo, tracking fields, and client-side data from event
         if linked_visit:
@@ -930,3 +945,141 @@ class TrackingService:
             "unique_domains": len(set(v.page_domain for v in visits if v.page_domain)),
             "unique_paths": len(set(v.path for v in visits if v.path))
         }
+
+    def _update_summaries(self, db: Session, client_id: str):
+        """Update JourneySummary and LeadSummary for a specific client_id.
+        Enhanced to match the robust SQL query logic.
+        """
+        # In tracking context, client_id is already the unique user key
+        # 1. Get chronological visits
+        visits = db.query(Visit).filter(Visit.client_id == client_id).order_by(Visit.timestamp.asc()).all()
+        if not visits: return
+
+        first = visits[0]
+        
+        # 2. Identify conversion time (/schedule)
+        conversion_ts = None
+        conversion_page = None
+        conversion_path = None
+        for v in visits:
+            # Check for /schedule path (fuzzy regex equivalent)
+            if v.path and ('/schedule' in v.path):
+                conversion_ts = v.timestamp
+                conversion_page = v.page_url
+                conversion_path = v.path
+                break
+
+        # 3. Get chronological paths (deduplicated)
+        path_list = []
+        last_path = None
+        for v in visits:
+            if conversion_ts and v.timestamp > conversion_ts:
+                break
+            if v.path != last_path:
+                path_list.append(v.path or "")
+                last_path = v.path
+        
+        journey_to_schedule = " → ".join(path_list)
+        
+        # 4. Aggregate form data (Events + URL Params)
+        form_data = {}
+        captured_data_parts = []
+        
+        # Pull from visit query_params (all visits up to conversion)
+        for v in visits:
+            if conversion_ts and v.timestamp > conversion_ts:
+                break
+            qp = v.query_params or {}
+            for k in ['email', 'name', 'company', 'organization', 'user_email']:
+                if k in qp:
+                    val = qp[k][0] if isinstance(qp[k], list) else qp[k]
+                    if val:
+                        form_data[k] = val
+        
+        # Pull from events
+        events = db.query(VisitEvent).filter(VisitEvent.client_id == client_id).order_by(VisitEvent.timestamp.asc()).all()
+        latest_form_ts = None
+        for ev in events:
+            if conversion_ts and ev.timestamp > conversion_ts:
+                break
+            
+            ed = ev.event_data or {}
+            event_has_data = False
+            # form_input style
+            if ev.event_type == 'form_input' and 'field_name' in ed:
+                k, v = str(ed.get('field_name')).lower(), ed.get('field_value')
+                if v:
+                    form_data[k] = v
+                    captured_data_parts.append(f"{ev.path or 'unknown'}: {k}={v}")
+                    event_has_data = True
+            
+            # form_submit style
+            if ev.event_type == 'form_submit' and 'form_values' in ed:
+                vals = ed.get('form_values') or {}
+                if isinstance(vals, dict):
+                    for k, v in vals.items():
+                        kl = str(k).lower()
+                        form_data[kl] = v
+                        captured_data_parts.append(f"{ev.path or 'unknown'}: {kl}={v}")
+                        event_has_data = True
+            
+            if event_has_data:
+                latest_form_ts = ev.timestamp
+
+        captured_data_str = " | ".join(captured_data_parts)
+        form_data_shared = " | ".join([f"{k}: {v}" for k, v in form_data.items()])
+        if not form_data_shared and not captured_data_str:
+            form_data_shared = "No info shared"
+
+        # Heuristic profile extraction
+        email = None
+        name = None
+        for k, v in form_data.items():
+            if not email and ('email' in k or 'mail' in k): email = v
+            if not name and ('name' in k or 'user' in k or 'full' in k): name = v
+
+        # 5. Update JourneySummary
+        journey = db.query(JourneySummary).filter(JourneySummary.client_id == client_id).first()
+        if not journey:
+            journey = JourneySummary(client_id=client_id)
+            db.add(journey)
+        
+        journey.first_seen = first.timestamp
+        journey.last_seen = conversion_ts or visits[-1].timestamp
+        journey.visit_count = len(visits)
+        journey.entry_page = first.page_url
+        journey.exit_page = conversion_page or visits[-1].page_url
+        journey.path_sequence = journey_to_schedule
+        journey.email = email
+        journey.name = name
+        journey.has_captured_data = 1 if (conversion_ts or captured_data_parts) else 0
+        journey.source = first.source
+        journey.medium = first.medium
+        journey.campaign = first.campaign
+
+        # 6. Update LeadSummary if has data
+        if conversion_ts or email or name or captured_data_parts:
+            lead = db.query(LeadSummary).filter(LeadSummary.client_id == client_id).first()
+            if not lead:
+                lead = LeadSummary(client_id=client_id)
+                db.add(lead)
+            
+            lead.email = email
+            lead.name = name
+            lead.captured_at = conversion_ts or latest_form_ts or first.timestamp
+            lead.captured_page = conversion_page or visits[-1].page_url
+            lead.captured_path = conversion_path or visits[-1].path
+            lead.form_data_shared = form_data_shared
+            lead.captured_data = captured_data_str
+            lead.source = first.source
+            lead.medium = first.medium
+            lead.campaign = first.campaign
+            lead.first_referrer = first.referrer
+            try:
+                from urllib.parse import urlparse
+                lead.first_referrer_domain = urlparse(first.referrer).netloc if first.referrer else None
+            except: pass
+            lead.first_seen = first.timestamp
+            lead.last_seen = conversion_ts or visits[-1].timestamp
+        
+        db.commit()

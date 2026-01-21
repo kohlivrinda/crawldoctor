@@ -6,22 +6,9 @@ const EmbedGuide: React.FC = () => {
   
   const baseUrl = 'https://crawldoctor.fly.dev';
   
-  // Generate comprehensive tracking code with multiple fallbacks
+  // Generate JavaScript tracking code (JS-only)
   const generateTrackingCode = (tid: string) => {
-    return `<!-- CrawlDoctor Tracking - Multiple Fallbacks -->
-<!-- Primary: Image Pixel -->
-<img src="${baseUrl}/track/pixel.gif?tid=${tid}" alt="" width="1" height="1" style="display:none;" />
-
-<!-- Fallback 1: Link Preloads -->
-<link rel="preload" href="${baseUrl}/track/data-uri?tid=${tid}&source=preload" as="fetch">
-<link rel="prefetch" href="${baseUrl}/track/json?tid=${tid}&source=prefetch">
-<link rel="dns-prefetch" href="${baseUrl}">
-
-<!-- Fallback 2: Meta and Link Tags -->
-<meta name="track-data" content="${baseUrl}/track/data-uri?tid=${tid}&source=meta">
-<link rel="alternate" type="application/json" href="${baseUrl}/track/json?tid=${tid}&source=alternate">
-
-<!-- Fallback 3: JavaScript (last resort) -->
+    return `<!-- CrawlDoctor JavaScript Tracking -->
 <script src="${baseUrl}/track/js?tid=${tid}" async></script>`;
   };
 
@@ -42,7 +29,7 @@ ${trackingCode}`;
       <div className="text-center">
         <h1 className="text-3xl font-bold text-gray-900 mb-4">Embed Tracking Code</h1>
         <p className="text-lg text-gray-600">
-          Add this single line of code to track ALL visitors (humans and AI crawlers) on your website
+          Add this single line of JavaScript to track visitors on your website
         </p>
       </div>
 
@@ -66,12 +53,12 @@ ${trackingCode}`;
 
       {/* Tracking Code Display */}
       <div className="bg-gray-50 p-6 rounded-lg">
-        <h2 className="text-xl font-semibold text-gray-800 mb-4">Your Complete Tracking Code</h2>
+        <h2 className="text-xl font-semibold text-gray-800 mb-4">Your Tracking Code</h2>
         <div className="bg-white p-4 rounded border max-h-64 overflow-y-auto">
           <pre className="text-sm text-gray-800 whitespace-pre-wrap">{trackingCode}</pre>
         </div>
         <p className="text-sm text-gray-600 mt-2">
-          ✅ <strong>Multiple fallbacks ensure maximum compatibility</strong> - works with browsers, crawlers, and AI systems
+          ✅ <strong>JavaScript tracking enabled</strong> - captures page views and form interactions
         </p>
       </div>
 
@@ -219,7 +206,7 @@ ${trackingCode}`;
         </p>
         <div className="bg-white p-4 rounded border">
           <p className="text-sm text-gray-600">
-            <strong>Note:</strong> The tracking pixel is invisible and won't affect your website's appearance or performance.
+            <strong>Note:</strong> This script is async and won't block page rendering.
           </p>
         </div>
       </div>

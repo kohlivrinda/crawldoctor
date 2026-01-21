@@ -11,6 +11,8 @@ import NotFound from './pages/NotFound';
 import Sessions from './pages/Sessions';
 import Users from './pages/Users';
 import Journeys from './pages/Journeys';
+import Funnels from './pages/Funnels';
+import Leads from './pages/Leads';
 
 function App() {
   return (
@@ -31,6 +33,8 @@ function App() {
               <Route path="dashboard" element={<Dashboard />} />
               <Route path="sessions" element={<Sessions />} />
               <Route path="journeys" element={<Journeys />} />
+              <Route path="funnels" element={<Funnels />} />
+              <Route path="leads" element={<Leads />} />
               <Route path="users" element={<Users />} />
               <Route path="embed" element={<EmbedGuide />} />
             </Route>

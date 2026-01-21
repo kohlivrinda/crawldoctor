@@ -48,34 +48,55 @@ const Users: React.FC = () => {
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
               <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Client ID</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Sessions</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Visits</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Events</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">User Identity</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">First Touch Source</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Campaign</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Activity</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Conversions</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">First Seen</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Seen</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Location</th>
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
               {users?.users?.map((user: any) => (
-                <tr key={user.client_id} className="hover:bg-gray-50">
+                <tr key={user.client_id} className={`hover:bg-gray-50 ${user.conversion_count > 0 ? 'bg-green-50' : ''}`}>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-blue-700">
-                    <button className="underline font-mono" onClick={() => setSelectedUser(user.client_id)}>
+                    <button className="underline font-mono font-medium" onClick={() => setSelectedUser(user.client_id)}>
                       {user.client_id.slice(0, 12)}...
                     </button>
+                    {user.conversion_count > 0 && (
+                      <div className="text-[10px] text-green-600 font-bold uppercase mt-1">Lead Captured</div>
+                    )}
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{user.session_count}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{user.visit_count}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{user.event_count}</td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                    {user.first_seen ? new Date(user.first_seen).toLocaleString() : '—'}
+                    <span className={`px-2 py-1 rounded text-xs font-semibold ${user.attribution?.source === 'direct' ? 'bg-gray-100' : 'bg-blue-100 text-blue-800'}`}>
+                      {user.attribution?.source || 'direct'}
+                    </span>
+                    <div className="text-xs text-gray-400 mt-1">{user.attribution?.medium || 'none'}</div>
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 italic">
+                    {user.attribution?.campaign || '—'}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                    <div className="flex flex-col">
+                      <span>{user.session_count} sessions</span>
+                      <span className="text-xs text-gray-500">{user.visit_count} page views</span>
+                    </div>
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-center">
+                    {user.conversion_count > 0 ? (
+                      <span className="bg-green-600 text-white px-2 py-1 rounded-full text-xs font-bold">
+                        {user.conversion_count}
+                      </span>
+                    ) : (
+                      <span className="text-gray-300">0</span>
+                    )}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                    {user.first_seen ? new Date(user.first_seen).toLocaleDateString() : '—'}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                     {user.last_seen ? new Date(user.last_seen).toLocaleString() : '—'}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                    {user.last_city && user.last_country ? `${user.last_city}, ${user.last_country}` : 'Unknown'}
                   </td>
                 </tr>
               ))}
@@ -148,23 +169,57 @@ const Users: React.FC = () => {
               <div className="p-4">Loading...</div>
             ) : userActivity ? (
               <div className="space-y-6">
+                {/* Attribution Header */}
+                <div className="bg-gradient-to-r from-indigo-500 to-purple-600 rounded-lg p-5 text-white shadow-md">
+                  <h4 className="text-xs font-bold uppercase tracking-wider opacity-80">First Touch Attribution</h4>
+                  <div className="mt-2 flex items-end justify-between">
+                    <div className="flex gap-8">
+                      <div>
+                        <div className="text-2xl font-bold">
+                          {userActivity.attribution?.source || 'Direct'}
+                        </div>
+                        <div className="text-xs opacity-80 uppercase font-medium">Source</div>
+                      </div>
+                      <div>
+                        <div className="text-2xl font-bold">
+                          {userActivity.attribution?.medium || 'None'}
+                        </div>
+                        <div className="text-xs opacity-80 uppercase font-medium">Medium</div>
+                      </div>
+                      <div className="hidden md:block">
+                        <div className="text-2xl font-bold truncate max-w-[200px]" title={userActivity.attribution?.campaign}>
+                          {userActivity.attribution?.campaign || '—'}
+                        </div>
+                        <div className="text-xs opacity-80 uppercase font-medium">Campaign</div>
+                      </div>
+                    </div>
+                    <div className="text-right text-xs opacity-90 max-w-[300px] hidden md:block">
+                      Landing: <span className="font-mono">{userActivity.attribution?.landing_page?.split('?')[0] || '—'}</span>
+                    </div>
+                  </div>
+                </div>
+
                 {/* Summary Stats */}
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                  <div className="bg-blue-50 p-4 rounded-lg">
-                    <div className="text-sm text-gray-600">Sessions</div>
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+                  <div className="bg-blue-50 p-4 rounded-lg border border-blue-100 shadow-sm">
+                    <div className="text-sm text-gray-600 font-medium">Total Sessions</div>
                     <div className="text-2xl font-bold text-blue-700">{userActivity.summary?.unique_sessions || 0}</div>
                   </div>
-                  <div className="bg-green-50 p-4 rounded-lg">
-                    <div className="text-sm text-gray-600">Visits</div>
+                  <div className="bg-green-50 p-4 rounded-lg border border-green-100 shadow-sm">
+                    <div className="text-sm text-gray-600 font-medium">Page Views</div>
                     <div className="text-2xl font-bold text-green-700">{userActivity.summary?.total_visits || 0}</div>
                   </div>
-                  <div className="bg-purple-50 p-4 rounded-lg">
-                    <div className="text-sm text-gray-600">Events</div>
+                  <div className="bg-purple-50 p-4 rounded-lg border border-purple-100 shadow-sm">
+                    <div className="text-sm text-gray-600 font-medium">Total Events</div>
                     <div className="text-2xl font-bold text-purple-700">{userActivity.summary?.total_events || 0}</div>
                   </div>
-                  <div className="bg-orange-50 p-4 rounded-lg">
-                    <div className="text-sm text-gray-600">Domains</div>
+                  <div className="bg-orange-50 p-4 rounded-lg border border-orange-100 shadow-sm">
+                    <div className="text-sm text-gray-600 font-medium">Active Domains</div>
                     <div className="text-2xl font-bold text-orange-700">{userActivity.summary?.unique_domains || 0}</div>
+                  </div>
+                  <div className="bg-emerald-50 p-4 rounded-lg border border-emerald-100 shadow-sm">
+                    <div className="text-sm text-gray-600 font-medium">Conversions</div>
+                    <div className="text-2xl font-bold text-emerald-700">{userActivity.summary?.conversions || 0}</div>
                   </div>
                 </div>
 
@@ -292,4 +347,3 @@ const Users: React.FC = () => {
 };
 
 export default Users;
-

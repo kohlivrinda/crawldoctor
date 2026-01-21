@@ -9,6 +9,7 @@ import structlog
 from app.database import get_db
 from app.models.user import User
 from app.models.visit import Visit, VisitSession
+from app.services.backfill import BackfillService
 from app.utils.auth import get_current_user, require_permission
 
 logger = structlog.get_logger()
@@ -118,7 +119,29 @@ async def get_recent_activity(
             }
             for visit in recent_visits
         ]
-        
     except Exception as e:
         logger.error("Failed to get recent activity", error=str(e))
         raise HTTPException(status_code=500, detail="Failed to get recent activity")
+
+
+@router.post("/rebuild-summaries")
+async def rebuild_summaries(
+    days: int = Query(90, ge=1, le=365),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Rebuild pre-computed lead and journey summaries."""
+    require_permission(current_user, "admin")
+    
+    try:
+        service = BackfillService()
+        result = service.backfill_all(db, days=days)
+        return {
+            "status": "success",
+            "message": f"Successfully rebuilt {result['journeys']} journeys and {result['leads']} leads.",
+            "details": result
+        }
+    except Exception as e:
+        logger.error("Failed to rebuild summaries", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+

@@ -222,8 +222,7 @@ class AuthService:
     
     def create_default_admin_sync(self, db: Session) -> User:
         """Create default admin user if it doesn't exist."""
-        admin_user = self.get_user_by_username(db, settings.admin_username)
-        
+        admin_user = db.query(User).filter(User.username == settings.admin_username).first()
         if admin_user:
             logger.info("Default admin user already exists")
             return admin_user

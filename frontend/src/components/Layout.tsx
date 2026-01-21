@@ -6,7 +6,6 @@ import {
   CogIcon,
   DocumentTextIcon,
   HomeIcon,
-  ShieldCheckIcon,
   UserIcon,
   UserGroupIcon,
   Bars3Icon,
@@ -18,6 +17,8 @@ const navigation = [
   { name: 'Dashboard', href: '/dashboard', icon: HomeIcon },
   { name: 'Sessions', href: '/sessions', icon: ClockIcon },
   { name: 'Journeys', href: '/journeys', icon: ChartBarIcon },
+  { name: 'Funnels', href: '/funnels', icon: CogIcon },
+  { name: 'Leads', href: '/leads', icon: UserIcon },
   { name: 'Users', href: '/users', icon: UserGroupIcon },
   { name: 'Embed Guide', href: '/embed', icon: DocumentTextIcon },
 ];
@@ -56,9 +57,9 @@ const Layout: React.FC = () => {
                 <h1 className="text-xl font-bold text-gradient">🕷️ CrawlDoctor</h1>
               </div>
               <nav className="flex flex-1 flex-col">
-                <ul role="list" className="flex flex-1 flex-col gap-y-7">
+                <ul className="flex flex-1 flex-col gap-y-7">
                   <li>
-                    <ul role="list" className="-mx-2 space-y-1">
+                    <ul className="-mx-2 space-y-1">
                       {allNavigation.map((item) => (
                         <li key={item.name}>
                           <Link
@@ -91,9 +92,9 @@ const Layout: React.FC = () => {
             <h1 className="text-xl font-bold text-gradient">🕷️ CrawlDoctor</h1>
           </div>
           <nav className="flex flex-1 flex-col">
-            <ul role="list" className="flex flex-1 flex-col gap-y-7">
+            <ul className="flex flex-1 flex-col gap-y-7">
               <li>
-                <ul role="list" className="-mx-2 space-y-1">
+                <ul className="-mx-2 space-y-1">
                   {allNavigation.map((item) => (
                     <li key={item.name}>
                       <Link

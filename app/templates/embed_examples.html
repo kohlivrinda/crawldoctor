@@ -103,51 +103,28 @@
     </div>
 
     <div class="container">
-        <h2>🚀 Quick Start - Pixel Tracking</h2>
+        <h2>🚀 Quick Start - JavaScript Tracking</h2>
         <div class="method">
-            <h3>Method 1: Simple Image Pixel</h3>
-            <p>The most compatible method - works with all crawlers including those that don't execute JavaScript:</p>
+            <h3>Method 1: Script Tag</h3>
+            <p>Recommended JS-only snippet for tracking page views, clicks, and form submits:</p>
             
             <div class="code-block">
-&lt;!-- Basic pixel tracking --&gt;
-&lt;img src="https://your-domain.com/track/pixel.gif" 
-     alt="" width="1" height="1" style="display:none;" /&gt;
-
-&lt;!-- With page URL tracking --&gt;
-&lt;img src="https://your-domain.com/track/pixel.gif?url=https://yoursite.com/page" 
-     alt="" width="1" height="1" style="display:none;" /&gt;
-
-&lt;!-- With tracking ID and campaign --&gt;
-&lt;img src="https://your-domain.com/track/pixel.gif?url=https://yoursite.com/page&tid=blog-2024&campaign=content-marketing" 
-     alt="" width="1" height="1" style="display:none;" /&gt;
+&lt;!-- CrawlDoctor JS tracker --&gt;
+&lt;script src="https://your-domain.com/track/js?tid=your-tracking-id" async&gt;&lt;/script&gt;
             </div>
             
             <div class="info">
-                <strong>💡 Pro Tip:</strong> Place this pixel at the bottom of your page content for best results.
+                <strong>💡 Pro Tip:</strong> Place this in your <code>&lt;head&gt;</code> so it loads early.
             </div>
         </div>
 
         <div class="method">
-            <h3>Method 2: JavaScript Enhanced Tracking</h3>
-            <p>Provides fallback compatibility and additional features:</p>
+            <h3>Method 2: Single-Page Apps</h3>
+            <p>Include the script once in your root layout. It automatically tracks SPA navigation.</p>
             
             <div class="code-block">
-&lt;!-- JavaScript with pixel fallback --&gt;
-&lt;script&gt;
-(function() {
-    var img = new Image();
-    img.src = 'https://your-domain.com/track/pixel.gif?' + 
-              'url=' + encodeURIComponent(window.location.href) +
-              '&title=' + encodeURIComponent(document.title) +
-              '&tid=your-tracking-id';
-})();
-&lt;/script&gt;
-
-&lt;!-- Fallback pixel for non-JS crawlers --&gt;
-&lt;noscript&gt;
-    &lt;img src="https://your-domain.com/track/pixel.gif?url=https://yoursite.com/page" 
-         alt="" width="1" height="1" style="display:none;" /&gt;
-&lt;/noscript&gt;
+&lt;!-- SPA-friendly: include once in root layout --&gt;
+&lt;script src="https://your-domain.com/track/js?tid=your-tracking-id" async&gt;&lt;/script&gt;
             </div>
         </div>
     </div>
@@ -156,52 +133,8 @@
         <h2>⚡ Advanced Tracking</h2>
         
         <div class="method">
-            <h3>Method 3: Full JavaScript SDK</h3>
-            <p>Complete tracking solution with event tracking and real-time analytics:</p>
-            
-            <div class="code-block">
-&lt;!-- Load CrawlDoctor SDK --&gt;
-&lt;script src="https://your-domain.com/track/embed.js?tracking_id=your-id&auto_track=true"&gt;&lt;/script&gt;
-
-&lt;!-- Manual page tracking --&gt;
-&lt;script&gt;
-CrawlDoctor.trackPageView(window.location.href, document.title);
-&lt;/script&gt;
-
-&lt;!-- Custom event tracking --&gt;
-&lt;script&gt;
-CrawlDoctor.trackEvent('engagement', 'scroll_50_percent', {
-    page: window.location.pathname,
-    timestamp: new Date().toISOString()
-});
-&lt;/script&gt;
-            </div>
-        </div>
-
-        <div class="method">
-            <h3>Method 4: Server-Side Integration</h3>
-            <p>For dynamic content and server-side rendering:</p>
-            
-            <div class="code-block">
-&lt;!-- PHP Example --&gt;
-&lt;?php
-$tracking_url = 'https://your-domain.com/track/pixel.gif?' . http_build_query([
-    'url' => $_SERVER['REQUEST_URI'],
-    'title' => $page_title,
-    'tid' => 'server-side-tracking',
-    'source' => 'organic'
-]);
-?&gt;
-&lt;img src="&lt;?= htmlspecialchars($tracking_url) ?&gt;" alt="" width="1" height="1" style="display:none;" /&gt;
-
-&lt;!-- Node.js/Express Example --&gt;
-const trackingUrl = `https://your-domain.com/track/pixel.gif?${new URLSearchParams({
-    url: req.originalUrl,
-    title: pageTitle,
-    tid: 'node-tracking',
-    source: 'server'
-})}`;
-            </div>
+            <h3>Automatic Events</h3>
+            <p>The JS tracker captures clicks, scroll depth, visibility changes, and form submits out of the box.</p>
         </div>
     </div>
 
@@ -219,34 +152,14 @@ const trackingUrl = `https://your-domain.com/track/pixel.gif?${new URLSearchPara
             </thead>
             <tbody>
                 <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>url</code></td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Page URL being tracked</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">https://example.com/blog/post</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>title</code></td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Page title</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">My Blog Post</td>
-                </tr>
-                <tr>
                     <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>tid</code></td>
                     <td style="padding: 12px; border: 1px solid #e2e8f0;">Tracking ID for segmentation</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">blog-2024</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">marketing-site</td>
                 </tr>
                 <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>campaign</code></td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Campaign name</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">content-marketing</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>source</code></td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Traffic source</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">social-media</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>medium</code></td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Traffic medium</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">organic</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>page</code></td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Optional page identifier override</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">/pricing</td>
                 </tr>
             </tbody>
         </table>
@@ -288,11 +201,11 @@ const trackingUrl = `https://your-domain.com/track/pixel.gif?${new URLSearchPara
         <h2>⚠️ Implementation Notes</h2>
         
         <div class="warning">
-            <strong>🔒 Privacy:</strong> This system respects privacy by only tracking crawlers, not human visitors. Configure your privacy policy accordingly.
+            <strong>🔒 Privacy:</strong> JavaScript tracking collects interaction metadata; avoid capturing sensitive fields and update your privacy policy accordingly.
         </div>
         
         <div class="info">
-            <strong>📈 Performance:</strong> Pixel tracking has minimal performance impact - the 1x1 pixel is only 43 bytes and loads asynchronously.
+            <strong>📈 Performance:</strong> The JS tracker loads async and won't block page rendering.
         </div>
         
         <div class="warning">
@@ -305,15 +218,20 @@ const trackingUrl = `https://your-domain.com/track/pixel.gif?${new URLSearchPara
         <p>Verify your tracking is working correctly:</p>
         
         <ol>
-            <li><strong>Check Network Tab:</strong> Look for requests to <code>/track/pixel.gif</code> in browser dev tools</li>
+            <li><strong>Check Network Tab:</strong> Look for requests to <code>/track/js</code> and <code>/track/event</code> in browser dev tools</li>
             <li><strong>Monitor Dashboard:</strong> Log into your CrawlDoctor dashboard to see real-time data</li>
             <li><strong>Test Different User Agents:</strong> Use browser dev tools to simulate different crawlers</li>
-            <li><strong>Verify Pixel Load:</strong> Ensure the tracking pixel loads without errors</li>
+            <li><strong>Verify Script Load:</strong> Ensure the JS tracker loads without errors</li>
         </ol>
         
         <div class="code-block">
-# Test with curl to simulate a crawler
-curl -H "User-Agent: GPTBot/1.0" "https://your-domain.com/track/pixel.gif?url=test"
+# Test loading the JS tracker
+curl "https://your-domain.com/track/js?tid=test-site"
+
+# Send a sample event
+curl -X POST "https://your-domain.com/track/event?tid=test-site" \
+  -H "Content-Type: text/plain" \
+  -d '{"event_type":"form_submit","page_url":"https://example.com/demo","data":{"form_values":{"email":"test@example.com"}}}'
 
 # Check if request was tracked
 curl -H "Authorization: Bearer YOUR_TOKEN" "https://your-domain.com/api/v1/analytics/realtime"

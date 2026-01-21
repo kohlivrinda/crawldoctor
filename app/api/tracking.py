@@ -170,6 +170,23 @@ async def track_js(
       } catch(e) {}
     }, true);
 
+    // Helper to extract page metadata
+    function getPageMetadata() {
+      var meta = {};
+      try {
+        meta.title = document.title;
+        var metas = document.getElementsByTagName('meta');
+        for (var i = 0; i < metas.length; i++) {
+          var m = metas[i];
+          var name = m.getAttribute('name') || m.getAttribute('property');
+          if (name && (name.indexOf('description') >= 0 || name.indexOf('og:title') >= 0 || name.indexOf('keywords') >= 0)) {
+            meta[name] = m.getAttribute('content');
+          }
+        }
+      } catch(e) {}
+      return meta;
+    }
+
     // Collect client-side data (cached after first call)
     var CLIENT_DATA_CACHE = null;
     function getClientSideData() {
@@ -185,7 +202,10 @@ async def track_js(
       return data;
     }
 
+    var __in_post_event = false;
     function postEvent(type, data) {
+      if (__in_post_event) return;
+      __in_post_event = true;
       try {
         var payload = {
           event_type: type,
@@ -195,7 +215,8 @@ async def track_js(
           visit_id: VISIT_ID,
           tid: TID,
           cid: CID,
-          client_side_data: getClientSideData()
+          client_side_data: getClientSideData(),
+          page_metadata: getPageMetadata()
         };
         var url = __origin + '/track/event?tid=' + encodeURIComponent(TID || '');
         var payloadStr = JSON.stringify(payload);
@@ -204,7 +225,7 @@ async def track_js(
         if (navigator.sendBeacon) {
           try {
             var sent = navigator.sendBeacon(url, payloadStr);
-            if (sent) return; // Success
+            if (sent) { __in_post_event = false; return; }
           } catch(e) {}
         }
         
@@ -216,10 +237,12 @@ async def track_js(
               body: payloadStr, 
               headers: { 'Content-Type': 'text/plain' }, 
               keepalive: true 
-            }).catch(function(err) {});
-          } catch(e) {}
+            }).catch(function(err) {}).finally(function(){ __in_post_event = false; });
+          } catch(e) { __in_post_event = false; }
+        } else {
+          __in_post_event = false;
         }
-      } catch(e) {}
+      } catch(e) { __in_post_event = false; }
     }
 
     // Page view event (guarded per page)
@@ -239,7 +262,14 @@ async def track_js(
         var text = a.innerText || a.getAttribute('aria-label') || a.name || a.id || null;
         var id = a.id || null;
         var cls = a.className || null;
-        postEvent('click', { href: href || null, text: text, id: id, class: cls, tracking_method: 'javascript' });
+        
+        postEvent('click', { 
+          href: href || null, 
+          text: text, 
+          id: id, 
+          class: cls, 
+          tracking_method: 'javascript' 
+        });
       } catch(e) {}
     }, { passive: true });
 
@@ -262,11 +292,39 @@ async def track_js(
       postEvent('visibility', { state: document.visibilityState, tracking_method: 'javascript' });
     });
 
-    // Navigation away
+    // Track time on page and engagement
+    var __pageEnterTime = Date.now();
+    var __lastEngagementTime = Date.now();
+    function getEngagementData() {
+      var now = Date.now();
+      return {
+        time_on_page_ms: now - __pageEnterTime,
+        idle_time_ms: now - __lastEngagementTime,
+        engaged: (now - __lastEngagementTime) < 30000,
+        tracking_method: 'javascript'
+      };
+    }
+    
+    // Update engagement on common interactions
+    function updateEngagement() { __lastEngagementTime = Date.now(); }
+    document.addEventListener('click', updateEngagement, { passive: true });
+    document.addEventListener('scroll', updateEngagement, { passive: true });
+    document.addEventListener('keypress', updateEngagement, { passive: true });
+
+    // Periodic heartbeat for "time on site" tracking
+    setInterval(function() {
+      if (document.visibilityState === 'visible') {
+        postEvent('heartbeat', getEngagementData());
+      }
+    }, 30000); // Every 30s
+
+    // Navigation away (refined)
     window.addEventListener('beforeunload', function() {
       try {
         var nav = performance && performance.getEntriesByType ? performance.getEntriesByType('navigation')[0] : null;
-        postEvent('navigate', { type: nav && nav.type || 'unknown', tracking_method: 'javascript', cid: CID });
+        var data = getEngagementData();
+        data.type = nav && nav.type || 'unknown';
+        postEvent('navigate', data);
       } catch(e) {}
     });
 
@@ -302,7 +360,7 @@ async def track_js(
       var n = (name || '').toLowerCase();
       var t = (type || '').toLowerCase();
       if (t === 'password') return true;
-      var keywords = ['password','pass','pwd','ssn','social','credit','card','cc','cvc','cvv','otp','token','secret','api_key','apikey','recaptcha'];
+      var keywords = ['password','pass','pwd','ssn','social','credit','card','cc','cvc','cvv','otp','token','secret','api_key','apikey','recaptcha','cvn','card_number','cvv2'];
       for (var i = 0; i < keywords.length; i++) {
         if (n.indexOf(keywords[i]) >= 0) return true;
       }
@@ -316,21 +374,62 @@ async def track_js(
         return { value: null, masked: true, length: v.length }; // Don't store sensitive data at all
       }
       var trimmed = ('' + v).trim();
-      var limit = 500;
+      var limit = 1000;
       var truncated = trimmed.length > limit ? trimmed.slice(0, limit) : trimmed;
       return { value: truncated, masked: false, length: trimmed.length, truncated: trimmed.length > limit };
     }
 
-    // Form tracking: submit only (no unsent data)
+    // Form tracking: broad capture for all interactive fields
     function shouldSkipField(el, type) {
       try {
         if (!el) return true;
         if (el.getAttribute && el.getAttribute('aria-hidden') === 'true') return true;
-        if (el.tabIndex === -1) return true;
-        if ((type || '').toLowerCase() === 'hidden') return true;
+        var t = (type || '').toLowerCase();
+        // Allow common input types even if they have negative tabIndex (common in custom UI kits)
+        if (t === 'hidden' || t === 'password' || t === 'submit' || t === 'button' || t === 'reset') return true;
       } catch(e) {}
       return false;
     }
+
+    // Track individual input changes (captures data even if form not submitted)
+    var __inputCache = {};
+    function emitInputTracking(el) {
+      try {
+        if (!el) return;
+        var type = (el.getAttribute('type') || el.tagName || '').toLowerCase();
+        if (shouldSkipField(el, type)) return;
+        
+        var name = el.name || el.id || el.getAttribute('placeholder') || el.getAttribute('aria-label') || 'unnamed';
+        var val = type === 'checkbox' || type === 'radio' ? (el.checked ? '1' : '0') : (el.value || '').trim();
+        
+        if (!val || val === __inputCache[name]) return;
+        __inputCache[name] = val;
+        
+        var safe = sanitizeValue(val, el, name, type);
+        if (safe.value === null) return;
+        
+        postEvent('form_input', {
+          field_name: name,
+          field_type: type,
+          field_value: safe.value,
+          tracking_method: 'javascript'
+        });
+      } catch(e) {}
+    }
+
+    document.addEventListener('blur', function(ev) {
+      var t = ev.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) {
+        emitInputTracking(t);
+      }
+    }, true);
+
+    document.addEventListener('change', function(ev) {
+      var t = ev.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) {
+        emitInputTracking(t);
+      }
+    }, true);
 
     function collectFormValues(form) {
       var inputs = form.querySelectorAll('input,textarea,select');
@@ -399,9 +498,8 @@ async def track_js(
     function shouldSkipNetworkField(name) {
       var n = (name || '').toLowerCase();
       if (!n) return true;
-      if (n.indexOf('__framer_') === 0) return true; // Internal Framer fields
       if (n.indexOf('g-recaptcha') === 0 || n.indexOf('recaptcha') >= 0) return true; // reCAPTCHA
-      if (n === 'data' || n.indexOf('phc_') >= 0 || n.indexOf('distinct_id') >= 0) return true; // PostHog/analytics tracking
+      if (n === 'phc_' || n.indexOf('distinct_id') >= 0) return true; // Analytics noise
       return false;
     }
     
@@ -420,6 +518,8 @@ async def track_js(
       var values = {};
       try {
         if (!body) return values;
+        var ct = (contentType || '').toLowerCase();
+        
         if (typeof FormData !== 'undefined' && body instanceof FormData) {
           body.forEach(function(val, key){
             if (shouldSkipNetworkField(key)) return;
@@ -432,13 +532,74 @@ async def track_js(
             var safe = sanitizeValue(String(val || ''), null, key, 'text');
             if (safe.value !== null) values[key] = safe.value;
           });
-        } else if (typeof body === 'string' && contentType && contentType.indexOf('application/x-www-form-urlencoded') >= 0) {
-          var params = new URLSearchParams(body);
-          params.forEach(function(val, key){
-            if (shouldSkipNetworkField(key)) return;
-            var safe = sanitizeValue(String(val || ''), null, key, 'text');
-            if (safe.value !== null) values[key] = safe.value;
-          });
+        } else if (typeof body === 'string' && ct.indexOf('multipart/form-data') >= 0) {
+          var bMatch = (contentType || '').match(/boundary=([^;]+)/i);
+          var boundary = bMatch ? bMatch[1] : null;
+          if (boundary) {
+            var parts = body.split('--' + boundary);
+            parts.forEach(function(part) {
+              if (part.indexOf('name="') >= 0) {
+                var nameMatch = part.match(/name="([^"]+)"/);
+                var valueParts = part.split('\r\n\r\n');
+                if (nameMatch && valueParts.length > 1) {
+                  var name = nameMatch[1];
+                  var val = valueParts[1].split('\r\n')[0].trim();
+                  if (shouldSkipNetworkField(name)) return;
+                  var safe = sanitizeValue(val, null, name, 'text');
+                  if (safe.value !== null) values[name] = safe.value;
+                }
+              }
+            });
+          }
+        } else if (ct.indexOf('application/json') >= 0 || ct.indexOf('text/plain') >= 0 || (typeof body === 'string' && (body.indexOf('{') === 0 || body.indexOf('[') === 0))) {
+          try {
+            var json = typeof body === 'string' ? JSON.parse(body) : body;
+            
+            function flatten(obj, prefix) {
+              if (!obj || typeof obj !== 'object') return;
+              for (var key in obj) {
+                if (!obj.hasOwnProperty(key)) continue;
+                var val = obj[key];
+                var name = prefix ? prefix + '.' + key : key;
+                
+                if (val === null || val === undefined) continue;
+                
+                if (typeof val === 'object' && !Array.isArray(val)) {
+                  flatten(val, name);
+                } else if (Array.isArray(val)) {
+                  val.forEach(function(item, i) {
+                    if (item && typeof item === 'object') flatten(item, name + '[' + i + ']');
+                    else {
+                      var safe = sanitizeValue(String(item), null, name, 'text');
+                      if (safe.value !== null) values[name + '[' + i + ']'] = safe.value;
+                    }
+                  });
+                } else {
+                  if (shouldSkipNetworkField(key)) continue;
+                  var safe = sanitizeValue(String(val), null, name, 'text');
+                  if (safe.value !== null) values[name] = safe.value;
+                  if (key === 'event' && !values['_event_name']) values['_event_name'] = val;
+                }
+              }
+            }
+
+            if (Array.isArray(json)) {
+              json.forEach(function(item, i) { flatten(item, 'item[' + i + ']'); });
+            } else {
+              flatten(json, '');
+            }
+          } catch(e) {}
+        } else if (typeof body === 'string' && ct.indexOf('application/x-www-form-urlencoded') >= 0) {
+          try {
+             if (typeof URLSearchParams !== 'undefined') {
+               var p = new URLSearchParams(body);
+               p.forEach(function(val, key){
+                 if (shouldSkipNetworkField(key)) return;
+                 var safe = sanitizeValue(String(val || ''), null, key, 'text');
+                 if (safe.value !== null) values[key] = safe.value;
+               });
+             }
+          } catch(e) {}
         }
       } catch(e) {}
       return values;
@@ -449,12 +610,19 @@ async def track_js(
         if (isAnalyticsRequest(url)) return; // Skip analytics tracking requests
         var keys = Object.keys(values || {});
         if (!keys.length) return;
-        postEvent('form_submit', {
+        
+        var eventType = 'form_submit';
+        if (values._event_name) {
+          eventType = values._event_name;
+          delete values._event_name;
+        }
+
+        postEvent(eventType, {
           id: null,
           name: null,
           action: url || null,
           method: (method || 'POST').toUpperCase(),
-          filled_fields: keys.length,
+          filled_fields: Object.keys(values).length,
           form_values: values,
           tracking_method: 'javascript'
         });
