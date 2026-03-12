@@ -31,7 +31,7 @@ def is_real_form_submit(event_data: Optional[Dict[str, Any]]) -> bool:
     data_str = str(event_data)
     if any(k in data_str for k in ("timingsV2", "memory.totalJSHeapSize", "eventType", '"data":')):
         return False
-    if len(data_str) > 2000:
+    if len(data_str) > 5000:
         return False
     form_vals = event_data.get("form_values") or event_data.get("values")
     if not form_vals or not isinstance(form_vals, dict):
@@ -92,6 +92,14 @@ DEFAULT_FUNNEL_CONFIG = {
             "steps": [
                 {"label": "Visited /sign-up", "type": "page", "path": "/sign-up"},
                 {"label": "Submitted form", "type": "event", "path": "/sign-up", "event_type": "form_submit"},
+            ],
+        },
+        {
+            "key": "bifrost_book_a_demo",
+            "label": "Any Page → /bifrost/book-a-demo → Form Submit",
+            "steps": [
+                {"label": "Visited /bifrost/book-a-demo", "type": "page", "path": "/bifrost/book-a-demo"},
+                {"label": "Submitted form", "type": "event", "path": "/bifrost/book-a-demo", "event_type": "form_submit"},
             ],
         },
         {
