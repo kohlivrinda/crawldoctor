@@ -263,6 +263,15 @@ async def test_iframe_form():
     return HTMLResponse(content="<p>Test template not found.</p>", status_code=404)
 
 
+@app.get("/test/cross-domain", response_class=HTMLResponse)
+async def test_cross_domain():
+    """Test page for verifying cross-domain session continuity between Maxim and Bifrost."""
+    path = Path(__file__).resolve().parent.parent / "tests" / "test_cross_domain.html"
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    return HTMLResponse(content="<p>Test page not found.</p>", status_code=404)
+
+
 # Root endpoint
 @app.get("/")
 async def root():

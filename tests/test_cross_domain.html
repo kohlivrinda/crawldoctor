@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Cross-Domain Session Test</title>
+  <style>
+    body { font-family: monospace; max-width: 800px; margin: 40px auto; line-height: 1.6; }
+    .step { background: #f5f5f5; padding: 16px; margin: 12px 0; border-left: 3px solid #333; }
+    a { color: #0066cc; font-weight: bold; }
+    code { background: #eee; padding: 2px 6px; }
+    h2 { margin-top: 32px; }
+    #info { background: #e8f5e9; padding: 16px; margin: 16px 0; }
+  </style>
+</head>
+<body>
+  <h1>Cross-Domain Session Test</h1>
+
+  <div id="info">
+    <strong>Current page:</strong> <span id="current-host"></span><br>
+    <strong>Referrer:</strong> <span id="current-referrer"></span><br>
+    <strong>CID (cd_cid):</strong> <span id="current-cid"></span><br>
+  </div>
+
+  <h2>Test Flow</h2>
+  <p>Open this page on both fake domains and click between them.
+     The tracker JS will decorate cross-domain links with <code>?cd_cid=...</code>,
+     and the server should keep them in the same session.</p>
+
+  <div class="step">
+    <strong>Step 1:</strong> Open on Maxim domain<br>
+    <a href="http://test.getmaxim.ai:8000/test/cross-domain">
+      http://test.getmaxim.ai:8000/test/cross-domain
+    </a>
+  </div>
+
+  <div class="step">
+    <strong>Step 2:</strong> Click this link to cross to Bifrost (should append cd_cid)<br>
+    <a href="http://test.getbifrost.ai:8000/test/cross-domain" id="bifrost-link">
+      http://test.getbifrost.ai:8000/test/cross-domain
+    </a>
+  </div>
+
+  <div class="step">
+    <strong>Step 3:</strong> Click this link to cross back to Maxim<br>
+    <a href="http://test.getmaxim.ai:8000/test/cross-domain" id="maxim-link">
+      http://test.getmaxim.ai:8000/test/cross-domain
+    </a>
+  </div>
+
+  <div class="step">
+    <strong>Step 4:</strong> Simulate external entry (new session)<br>
+    <button onclick="window.open('http://test.getmaxim.ai:8000/test/cross-domain?utm_source=google', '_blank', 'noopener,noreferrer')">
+      Open with no referrer + utm_source=google
+    </button>
+    <br><small>Opens in a new tab with no referrer (simulates arriving from Google).
+    This should create a NEW session. Then continue steps 2→3 from that tab.</small>
+  </div>
+
+  <h2>Verify</h2>
+  <p>After clicking through, run this SQL on your Neon staging DB:</p>
+  <pre>
+-- Sessions: steps 1-3 should share one session_id
+-- Step 4 should be a different session_id
+SELECT id, client_id, first_visit, last_visit,
+       entry_referrer_domain, is_external_entry
+FROM visit_sessions
+ORDER BY last_visit DESC LIMIT 5;
+
+-- Visits: check session_id grouping
+SELECT id, session_id, page_domain, referrer, source, timestamp
+FROM visits
+ORDER BY timestamp DESC LIMIT 10;
+
+-- Events: same session_id across domains
+SELECT id, session_id, event_type, page_domain,
+       referrer_domain, source
+FROM visit_events
+ORDER BY timestamp DESC LIMIT 15;
+  </pre>
+
+  <!-- Load the tracker -->
+  <script src="/track/js?tid=session-test"></script>
+
+  <script>
+    document.getElementById('current-host').textContent = location.host;
+    document.getElementById('current-referrer').textContent = document.referrer || '(none)';
+
+    // Show the current cd_cid
+    var cid = localStorage.getItem('cd_cid_session-test')
+           || localStorage.getItem('cd_cid_' + location.hostname);
+    if (!cid) {
+      var m = document.cookie.match(/(^| )cd_cid=([^;]+)/);
+      if (m) cid = m[2];
+    }
+    document.getElementById('current-cid').textContent = cid || '(not found yet - reload after tracker loads)';
+  </script>
+</body>
+</html>

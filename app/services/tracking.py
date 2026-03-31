@@ -15,6 +15,7 @@ from app.services.crawler_detection import CrawlerDetectionService, CrawlerDetec
 from app.services.analytics import is_real_form_submit
 from app.services.event_batcher import event_batcher
 from app.services.geo import GeoLocationService
+from app.utils.domains import is_internal_domain, classify_domain
 from app.config import settings
 
 logger = structlog.get_logger()
@@ -22,31 +23,158 @@ logger = structlog.get_logger()
 
 class TrackingService:
     """Simplified service for tracking ALL visits with automatic categorization."""
-    
+
     def __init__(self):
         self.crawler_detector = CrawlerDetectionService()
         self.geo_service = GeoLocationService()
-        
+
+    # ------------------------------------------------------------------
+    # Session identity helpers
+    # ------------------------------------------------------------------
+
     def _generate_session_id(
         self,
         ip_address: str,
         user_agent: str,
-        page_domain: Optional[str] = None,
-        client_id: Optional[str] = None
+        client_id: Optional[str] = None,
+        journey_seq: int = 0,
     ) -> str:
-        """Generate a privacy-friendly session ID.
+        """Generate a journey-based session ID.
 
-        Priority:
-        - If client_id is provided (from first-party storage), prefer it
-        - Include page_domain to avoid cross-site collisions
-        - Rotate daily to bound session lifetime
+        The hash is derived from the user's canonical identity (cid or
+        ip+ua) plus a monotonic journey counter.  page_domain and
+        calendar day are intentionally excluded so sessions span domains
+        and midnight boundaries.
         """
-        day_bucket = datetime.now(timezone.utc).date().isoformat()
         if client_id:
-            session_data = f"cid:{client_id}:d:{page_domain or ''}:day:{day_bucket}"
+            session_data = f"cid:{client_id}:journey:{journey_seq}"
         else:
-            session_data = f"ipua:{ip_address}:{user_agent}:d:{page_domain or ''}:day:{day_bucket}"
+            session_data = f"ipua:{ip_address}:{user_agent}:journey:{journey_seq}"
         return hashlib.sha256(session_data.encode()).hexdigest()[:32]
+
+    def _is_external_entry(
+        self,
+        referrer: Optional[str],
+        referrer_domain: Optional[str],
+        page_domain: Optional[str],
+        event_type: Optional[str] = None,
+        source: Optional[str] = None,
+        medium: Optional[str] = None,
+        campaign: Optional[str] = None,
+    ) -> bool:
+        """Decide whether this event represents a fresh external entry.
+
+        Returns True  → start a new session.
+        Returns False → continue the existing session.
+
+        Rules:
+        1. Heartbeat/scroll/visibility events are continuity — never new session.
+        2. If referrer_domain is known:
+           – internal → continue
+           – external → new session
+        3. If referrer_domain is missing, check fallbacks (source, medium,
+           campaign) to infer origin:
+           – source resolves to an internal domain → continue
+           – source resolves to a known external origin → new session
+           – source is unknown but medium/campaign present → new session
+             (UTM params imply an inbound marketing link)
+        4. If NO signal at all → new session (we can't prove continuity,
+           so treat it as a fresh entry).
+        """
+        # Heartbeats are continuity signals, never session boundaries
+        if event_type in ("heartbeat", "visibility", "scroll"):
+            return False
+
+        # If we know the referrer domain, that's the strongest signal
+        if referrer_domain:
+            if is_internal_domain(referrer_domain):
+                return False
+            return True  # external referrer → new session
+
+        # No referrer_domain — fall back to source/medium/campaign.
+        if source:
+            src_lower = source.lower()
+            # If source is itself an internal domain, continue
+            if is_internal_domain(src_lower):
+                return False
+            # Well-known external origins — treat as new entry
+            _EXTERNAL_SOURCES = {
+                "google", "bing", "yahoo", "duckduckgo",
+                "linkedin", "facebook", "twitter", "instagram",
+                "reddit", "youtube", "tiktok", "github",
+            }
+            if src_lower in _EXTERNAL_SOURCES:
+                return True
+            # Unknown source value but it's *something* — lean towards new session
+            return True
+
+        # No source either — do we have medium or campaign?
+        # UTM medium/campaign without a source still implies an inbound link.
+        if medium or campaign:
+            return True
+
+        # Zero signal: no referrer, no source, no utm — new session
+        return True
+
+    def _resolve_existing_session(
+        self,
+        db: Session,
+        ip_address: str,
+        user_agent: str,
+        client_id: Optional[str] = None,
+    ) -> Optional[VisitSession]:
+        """Find the most recent active session for this user across ALL internal domains.
+
+        Lookup order:
+        1. By client_id (strongest — works across domains)
+        2. By ip_address + user_agent prefix (fallback for anonymous users)
+        """
+        try:
+            if client_id:
+                session = (
+                    db.query(VisitSession)
+                    .filter(VisitSession.client_id == client_id)
+                    .order_by(VisitSession.last_visit.desc())
+                    .first()
+                )
+                if session:
+                    return session
+
+            # Fallback: ip + ua (may match across domains if same browser)
+            session = (
+                db.query(VisitSession)
+                .filter(
+                    VisitSession.ip_address == ip_address,
+                    VisitSession.user_agent == user_agent[:500],
+                )
+                .order_by(VisitSession.last_visit.desc())
+                .first()
+            )
+            return session
+        except Exception:
+            return None
+
+    def _next_journey_seq(
+        self,
+        db: Session,
+        ip_address: str,
+        user_agent: str,
+        client_id: Optional[str] = None,
+    ) -> int:
+        """Return the next journey sequence number for this user identity."""
+        try:
+            if client_id:
+                count = db.query(func.count(VisitSession.id)).filter(
+                    VisitSession.client_id == client_id
+                ).scalar() or 0
+            else:
+                count = db.query(func.count(VisitSession.id)).filter(
+                    VisitSession.ip_address == ip_address,
+                    VisitSession.user_agent == user_agent[:500],
+                ).scalar() or 0
+            return count
+        except Exception:
+            return 0
     
     def _extract_page_info(self, url: str) -> Dict[str, Any]:
         """Extract information from page URL."""
@@ -131,24 +259,51 @@ class TrackingService:
         client_side_data: Optional[Dict[str, Any]] = None,
     ) -> Visit:
         """Track ANY visit with automatic categorization."""
-        
+
         # Extract page information
         page_info = self._extract_page_info(page_url or "")
 
-        # Generate session ID (domain-aware; prefer CID when provided)
-        session_id = self._generate_session_id(ip_address, user_agent, page_info.get("domain"), client_id)
-        
+        # Extract referrer domain for session boundary decision
+        referrer_domain = None
+        if referrer:
+            try:
+                referrer_domain = urlparse(referrer).netloc
+            except Exception:
+                pass
+
+        utm_info = self._extract_utm(page_info, referrer)
+
+        # --- Journey-based session resolution ---
+        existing_session = self._resolve_existing_session(db, ip_address, user_agent, client_id)
+
+        if existing_session and not self._is_external_entry(
+            referrer, referrer_domain, page_info.get("domain"),
+            event_type="page_view", source=utm_info.get("source"),
+            medium=utm_info.get("medium"), campaign=utm_info.get("campaign"),
+        ):
+            # Continue existing journey
+            session_id = existing_session.id
+            session = existing_session
+        else:
+            # New journey — external entry or first visit ever
+            seq = self._next_journey_seq(db, ip_address, user_agent, client_id)
+            session_id = self._generate_session_id(ip_address, user_agent, client_id, seq)
+            session = db.query(VisitSession).filter(VisitSession.id == session_id).first()
+
         # Get or create session
-        session = db.query(VisitSession).filter(VisitSession.id == session_id).first()
+        is_new_session = session is None
         if not session:
             session = VisitSession(
                 id=session_id,
                 ip_address=ip_address,
                 user_agent=user_agent[:500],
-                client_id=client_id,  # Store client_id for unified tracking
+                client_id=client_id,
                 first_visit=datetime.now(timezone.utc),
                 last_visit=datetime.now(timezone.utc),
-                visit_count=0
+                visit_count=0,
+                entry_referrer=referrer[:2000] if referrer else None,
+                entry_referrer_domain=referrer_domain,
+                is_external_entry=is_new_session,
             )
             # Add client-side data to session if provided
             if client_side_data:
@@ -184,10 +339,7 @@ class TrackingService:
         
         # Categorize visitor
         visitor_info = self._categorize_visitor(user_agent)
-        
-        # Extract UTM/source information
-        utm_info = self._extract_utm(page_info, referrer)
-        
+
         # Get geographic information
         # Prioritize humans in geo budget; defer bots
         geo_info = await self.geo_service.get_location_info(ip_address, category="bot" if visitor_info.get("is_crawler") else "human")
@@ -384,13 +536,36 @@ class TrackingService:
             except Exception:
                 referrer_domain = None
 
-        # Session derived from client_id when available to avoid NAT collisions
-        session_id = self._generate_session_id(ip_address, user_agent, page_domain, client_id)
-
         # Categorize and geo for event context
         visitor_info = self._categorize_visitor(user_agent)
         geo_info = await self.geo_service.get_location_info(ip_address, category="bot" if visitor_info.get("is_crawler") else "human")
         utm_info = self._extract_utm(page_info, referrer)
+
+        # --- Journey-based session resolution ---
+        existing_session = self._resolve_existing_session(db, ip_address, user_agent, client_id)
+        is_external = self._is_external_entry(
+            referrer, referrer_domain, page_domain,
+            event_type=event_type, source=utm_info.get("source"),
+            medium=utm_info.get("medium"), campaign=utm_info.get("campaign"),
+        )
+
+        logger.info(
+            "Session resolution",
+            event_type=event_type,
+            referrer_domain=referrer_domain,
+            page_domain=page_domain,
+            source=utm_info.get("source"),
+            has_existing_session=existing_session is not None,
+            existing_session_id=existing_session.id[:12] if existing_session else None,
+            is_external=is_external,
+            client_id=client_id[:12] if client_id else None,
+        )
+
+        if existing_session and not is_external:
+            session_id = existing_session.id
+        else:
+            seq = self._next_journey_seq(db, ip_address, user_agent, client_id)
+            session_id = self._generate_session_id(ip_address, user_agent, client_id, seq)
 
         # Define effective_session_id early - it will be refined later if needed
         effective_session_id = session_id
@@ -417,16 +592,22 @@ class TrackingService:
                     linked_visit = candidate
             except Exception:
                 linked_visit = None
-            # Fallback: find by previous IP/UA session id and page
+            # Fallback: find any recent visit by this user for this page
             if not linked_visit:
                 try:
-                    previous_session_id = self._generate_session_id(ip_address, user_agent, page_domain)
-                    linked_visit = (
-                        db.query(Visit)
-                        .filter(Visit.session_id == previous_session_id, Visit.page_url == page_url)
-                        .order_by(Visit.timestamp.desc())
-                        .first()
+                    fallback_cutoff = datetime.now(timezone.utc) - timedelta(minutes=10)
+                    q = db.query(Visit).filter(
+                        Visit.page_url == page_url,
+                        Visit.timestamp >= fallback_cutoff,
                     )
+                    if client_id:
+                        q = q.filter(Visit.client_id == client_id)
+                    else:
+                        q = q.filter(
+                            Visit.ip_address == ip_address,
+                            Visit.user_agent == user_agent[:1000],
+                        )
+                    linked_visit = q.order_by(Visit.timestamp.desc()).first()
                 except Exception:
                     linked_visit = None
 
@@ -473,13 +654,16 @@ class TrackingService:
                 id=effective_session_id,
                 ip_address=ip_address,
                 user_agent=user_agent[:500],
-                client_id=client_id,  # Store client_id for unified tracking
+                client_id=client_id,
                 first_visit=datetime.now(timezone.utc),
                 last_visit=datetime.now(timezone.utc),
                 visit_count=0,
                 country=existing_location.get("country") if existing_location else None,
                 city=existing_location.get("city") if existing_location else None,
-                country_name=existing_location.get("country_name") if existing_location else None
+                country_name=existing_location.get("country_name") if existing_location else None,
+                entry_referrer=referrer[:2000] if referrer else None,
+                entry_referrer_domain=referrer_domain,
+                is_external_entry=True,
             )
             db.add(session_row)
             db.flush()  # Make sure session exists before creating visit
@@ -572,8 +756,8 @@ class TrackingService:
         # If we found a linked visit and have a client_id, migrate the visit to the CID-scoped session
         if linked_visit:
             effective_session_id = linked_visit.session_id
-            if client_id:
-                target_session_id = self._generate_session_id(ip_address, user_agent, page_domain, client_id)
+            if client_id and linked_visit.session_id != session_id:
+                target_session_id = session_id
                 if linked_visit.session_id != target_session_id:
                     # Ensure target session exists
                     target_session = db.query(VisitSession).filter(VisitSession.id == target_session_id).first()

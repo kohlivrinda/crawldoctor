@@ -139,7 +139,7 @@ class AnalyticsService:
         
         stats = db.query(
             func.count(Visit.id).label('total'),
-            func.count(func.distinct(Visit.session_id)).label('unique_visitors'),
+            func.count(func.distinct(func.coalesce(Visit.client_id, Visit.session_id))).label('unique_visitors'),
             func.sum(case((Visit.is_bot == True, 1), else_=0)).label('ai_crawlers'),
             func.sum(case((and_(Visit.is_bot == False, Visit.user_agent.ilike('%mobile%')), 1), else_=0)).label('mobile_humans'),
             func.sum(case((and_(Visit.is_bot == False, ~Visit.user_agent.ilike('%mobile%')), 1), else_=0)).label('desktop_humans')
@@ -785,7 +785,7 @@ class AnalyticsService:
         page_visits_query = db.query(
             Visit.page_domain,
             func.count(Visit.id).label('count'),
-            func.count(func.distinct(Visit.session_id)).label('unique_visitors')
+            func.count(func.distinct(func.coalesce(Visit.client_id, Visit.session_id))).label('unique_visitors')
         ).filter(
             Visit.timestamp >= since,
             Visit.page_domain.isnot(None)

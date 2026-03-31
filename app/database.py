@@ -1,6 +1,6 @@
 """Database configuration and session management."""
 from datetime import date, timedelta
-from sqlalchemy import create_engine, MetaData, text
+from sqlalchemy import create_engine, event, MetaData, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import QueuePool
@@ -22,13 +22,22 @@ engine = create_engine(
     pool_timeout=settings.database_pool_timeout,
     echo=settings.debug,
     connect_args={
-        "options": f"-c statement_timeout={settings.database_statement_timeout}",
         "connect_timeout": 30,
     },
     execution_options={
         "isolation_level": "READ COMMITTED"
     }
 )
+
+
+
+# Set statement_timeout after connect rather than as a startup parameter,
+# since Neon's connection pooler rejects it in the startup packet.
+@event.listens_for(engine, "connect")
+def _set_statement_timeout(dbapi_conn, connection_record):
+    cursor = dbapi_conn.cursor()
+    cursor.execute(f"SET statement_timeout = {settings.database_statement_timeout}")
+    cursor.close()
 
 # Session configuration
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

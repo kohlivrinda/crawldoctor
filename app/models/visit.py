@@ -24,6 +24,11 @@ class VisitSession(Base):
     first_visit = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
     last_visit = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
     visit_count = Column(Integer, default=0)
+
+    # Journey entry context
+    entry_referrer = Column(String(2000))
+    entry_referrer_domain = Column(String(200), index=True)
+    is_external_entry = Column(Boolean, default=True)
     
     # Geographic information
     country = Column(String(2), index=True)
