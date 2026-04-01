@@ -390,30 +390,33 @@ class SessionBackfillService:
             if (i // batch_size) % 10 == 0:
                 logger.info("Sessions insert progress", done=min(i + batch_size, len(to_insert)), total=len(to_insert))
 
-        db.flush()
+        db.commit()
         logger.info("Session rows created", created=created, skipped=skipped)
 
-        # 5a. Remap visits in bulk — batch UPDATE with CASE
+        # 5a. Remap visits in bulk batches
         logger.info("Remapping visits", count=len(visit_updates))
         visit_items = list(visit_updates.items())
         for i in range(0, len(visit_items), batch_size):
             chunk = visit_items[i:i+batch_size]
-            # Build a temp-table approach: update via VALUES join
+            # Use a temp table approach via CTE for clean parameterization
             params = {}
-            values_parts = []
+            case_parts = []
+            id_params = []
             for j, (vid, new_sid) in enumerate(chunk):
                 params[f"v{j}"] = vid
                 params[f"s{j}"] = new_sid
-                values_parts.append(f"(:v{j}\\:\\:bigint, :s{j})")
+                case_parts.append(f"WHEN id = :v{j} THEN :s{j}")
+                id_params.append(f":v{j}")
             sql = (
-                f"UPDATE visits SET session_id = m.new_sid "
-                f"FROM (VALUES {','.join(values_parts)}) AS m(vid, new_sid) "
-                f"WHERE visits.id = m.vid"
+                f"UPDATE visits SET session_id = CASE {' '.join(case_parts)} END "
+                f"WHERE id IN ({','.join(id_params)})"
             )
             db.execute(text(sql), params)
             if (i // batch_size) % 10 == 0:
+                db.commit()
                 logger.info("Visits remapped progress", done=min(i + batch_size, len(visit_items)), total=len(visit_items))
-        db.flush()
+        db.commit()
+        logger.info("Visits remapped done")
 
         # 5b. Remap events — bulk update by old→new session_id
         old_to_new_session: Dict[str, str] = {}
@@ -425,40 +428,47 @@ class SessionBackfillService:
         for i in range(0, len(mapping_items), batch_size):
             chunk = mapping_items[i:i+batch_size]
             params = {}
-            values_parts = []
+            case_parts = []
+            id_params = []
             for j, (old_sid, new_sid) in enumerate(chunk):
                 params[f"o{j}"] = old_sid
                 params[f"n{j}"] = new_sid
-                values_parts.append(f"(:o{j}, :n{j})")
+                case_parts.append(f"WHEN session_id = :o{j} THEN :n{j}")
+                id_params.append(f":o{j}")
             sql = (
-                f"UPDATE visit_events SET session_id = m.new_sid "
-                f"FROM (VALUES {','.join(values_parts)}) AS m(old_sid, new_sid) "
-                f"WHERE visit_events.session_id = m.old_sid"
+                f"UPDATE visit_events SET session_id = CASE {' '.join(case_parts)} END "
+                f"WHERE session_id IN ({','.join(id_params)})"
             )
             db.execute(text(sql), params)
             if (i // batch_size) % 10 == 0:
+                db.commit()
                 logger.info("Events remapped progress", done=min(i + batch_size, len(mapping_items)), total=len(mapping_items))
-        db.flush()
-
-        # # 6b. Write audit log
-        # logger.info("Writing audit log", rows=len(audit_log))
-        # for entry in audit_log:
-        #     db.execute(
-        #         text(
-        #             "INSERT INTO session_id_migration_log "
-        #             "(old_session_id, new_session_id, client_id, visit_count_moved, event_count_moved) "
-        #             "VALUES (:old, :new, :cid, :vc, :ec)"
-        #         ),
-        #         {
-        #             "old": entry["old_session_id"],
-        #             "new": entry["new_session_id"],
-        #             "cid": entry.get("client_id"),
-        #             "vc": entry.get("visit_count_moved", 0),
-        #             "ec": entry.get("event_count_moved", 0),
-        #         },
-        #     )
-
         db.commit()
+        logger.info("Events remapped done")
+
+        # 6b. Write audit log
+        logger.info("Writing audit log", rows=len(audit_log))
+        for i in range(0, len(audit_log), batch_size):
+            chunk = audit_log[i:i+batch_size]
+            params = {}
+            values_parts = []
+            for j, entry in enumerate(chunk):
+                params[f"o{j}"] = entry["old_session_id"]
+                params[f"n{j}"] = entry["new_session_id"]
+                params[f"c{j}"] = entry.get("client_id")
+                params[f"vc{j}"] = entry.get("visit_count_moved", 0)
+                params[f"ec{j}"] = entry.get("event_count_moved", 0)
+                values_parts.append(f"(:o{j}, :n{j}, :c{j}, :vc{j}, :ec{j})")
+            sql = (
+                "INSERT INTO session_id_migration_log "
+                "(old_session_id, new_session_id, client_id, visit_count_moved, event_count_moved) "
+                f"VALUES {','.join(values_parts)}"
+            )
+            db.execute(text(sql), params)
+            if (i // batch_size) % 10 == 0:
+                db.commit()
+        db.commit()
+        logger.info("Audit log done")
 
     # ------------------------------------------------------------------
     # Helpers
