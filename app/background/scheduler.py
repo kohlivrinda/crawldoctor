@@ -66,7 +66,7 @@ class JobScheduler:
                 if self._is_due(job):
                     try:
                         await loop.run_in_executor(
-                            self._executor, self._run_sweep, job
+                            self._executor, self._run_sweep, job, loop
                         )
                     except Exception as exc:
                         logger.error(
@@ -86,7 +86,7 @@ class JobScheduler:
         h = hashlib.md5(job_name.encode()).hexdigest()
         return int(h[:8], 16)
 
-    def _run_sweep(self, job: RegisteredJob) -> None:
+    def _run_sweep(self, job: RegisteredJob, loop: asyncio.AbstractEventLoop) -> None:
         """Execute one sweep: lock -> read watermark -> sweep -> enqueue -> advance watermark."""
         db = SessionLocal()
         try:
@@ -126,7 +126,6 @@ class JobScheduler:
                     )
 
                 # Enqueue each payload (async — need to bridge from sync context)
-                loop = asyncio.get_event_loop()
                 for payload in payloads:
                     dedup_key = payload.get("client_id")
                     asyncio.run_coroutine_threadsafe(
