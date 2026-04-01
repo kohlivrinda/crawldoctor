@@ -470,6 +470,43 @@ class SessionBackfillService:
         db.commit()
         logger.info("Audit log done")
 
+        # 7. Delete orphaned session rows — both remapped old sessions and
+        #    any sessions with no visits/events (e.g. from dedup race conditions)
+        old_sids_to_delete = [
+            entry["old_session_id"]
+            for entry in audit_log
+            if entry["old_session_id"] != entry["new_session_id"]
+        ]
+        logger.info("Cleaning up remapped session rows", count=len(old_sids_to_delete))
+        deleted_remapped = 0
+        for i in range(0, len(old_sids_to_delete), batch_size):
+            chunk = old_sids_to_delete[i:i+batch_size]
+            params = {f"s{j}": sid for j, sid in enumerate(chunk)}
+            placeholders = ",".join(f":s{j}" for j in range(len(chunk)))
+            sql = (
+                f"DELETE FROM visit_sessions WHERE id IN ({placeholders}) "
+                f"AND NOT EXISTS (SELECT 1 FROM visits WHERE session_id = visit_sessions.id) "
+                f"AND NOT EXISTS (SELECT 1 FROM visit_events WHERE session_id = visit_sessions.id)"
+            )
+            result = db.execute(text(sql), params)
+            deleted_remapped += result.rowcount
+            if (i // batch_size) % 10 == 0:
+                db.commit()
+        db.commit()
+        logger.info("Remapped session rows deleted", deleted=deleted_remapped,
+                     skipped=len(old_sids_to_delete) - deleted_remapped)
+
+        # 7b. Clean up any other orphaned sessions (visit_count=0, no references)
+        result = db.execute(text(
+            "DELETE FROM visit_sessions "
+            "WHERE visit_count = 0 "
+            "AND NOT EXISTS (SELECT 1 FROM visits WHERE session_id = visit_sessions.id) "
+            "AND NOT EXISTS (SELECT 1 FROM visit_events WHERE session_id = visit_sessions.id)"
+        ))
+        deleted_orphans = result.rowcount
+        db.commit()
+        logger.info("Orphaned session rows deleted", deleted=deleted_orphans)
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------

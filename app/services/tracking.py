@@ -313,8 +313,8 @@ class TrackingService:
                 session.client_side_viewport_size = client_side_data.get('viewport_size')
                 session.client_side_device_memory = client_side_data.get('device_memory')
                 session.client_side_connection_type = client_side_data.get('connection_type')
-            db.add(session)
         else:
+            is_new_session = False
             # Update client_id if provided and not already set
             if client_id and not session.client_id:
                 session.client_id = client_id
@@ -332,10 +332,9 @@ class TrackingService:
                     session.client_side_device_memory = client_side_data.get('device_memory')
                 if not session.client_side_connection_type:
                     session.client_side_connection_type = client_side_data.get('connection_type')
-        
+
         # Update session (only update last_visit here; increment visit_count only on new visit)
         session.last_visit = datetime.now(timezone.utc)
-        db.add(session)
         
         # Categorize visitor
         visitor_info = self._categorize_visitor(user_agent)
@@ -388,7 +387,11 @@ class TrackingService:
             existing_visit = None
 
         if existing_visit:
-            # Optionally merge custom headers/data to existing record and return it
+            # Dedup hit — update the existing visit but don't persist a new session
+            # (if is_new_session, the session object hasn't been db.add()'d yet,
+            #  so it won't be flushed to the database)
+            if not is_new_session:
+                db.add(session)
             updated = False
             if headers:
                 try:
@@ -424,6 +427,9 @@ class TrackingService:
             except Exception:
                 db.rollback()
             return existing_visit
+
+        # Past the dedup check — this visit will be created, so persist the session
+        db.add(session)
 
         # Populate visit geo from session (inherit from session if available)
         visit_country = geo_info.get("country_code") if geo_info else None
