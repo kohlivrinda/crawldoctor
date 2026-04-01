@@ -332,9 +332,11 @@ class TestBackfillJourneyAssignment:
         rec = self._rec(event_type="heartbeat", referrer_domain=None)
         assert self.svc._should_start_new_journey(rec, self._meta()) is False
 
-    def test_zero_signal_new(self):
+    def test_zero_signal_continues(self):
+        # Zero-signal page entries (direct visits, bookmarks) continue the
+        # current session in backfill to avoid over-fragmentation.
         rec = self._rec(referrer_domain=None, source=None, medium=None, campaign=None)
-        assert self.svc._should_start_new_journey(rec, self._meta()) is True
+        assert self.svc._should_start_new_journey(rec, self._meta()) is False
 
     def test_utm_campaign_only_new(self):
         rec = self._rec(referrer_domain=None, source=None, campaign="spring-launch")
