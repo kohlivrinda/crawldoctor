@@ -43,10 +43,12 @@ class BackfillService:
         client_ids = list({e.client_id for e in real_events if e.client_id})
         logger.info("Form-fill backfill: real form submits", total_events=len(real_events), unique_clients=len(client_ids))
 
-        # 3. Clear existing pre-computed data
-        db.query(JourneyFormFill).delete()
-        db.query(JourneySummary).delete()
-        db.query(LeadSummary).delete()
+        # 3. Clear pre-computed data only for clients we're about to rebuild
+        if client_ids:
+            db.query(JourneyFormFill).filter(JourneyFormFill.client_id.in_(client_ids)).delete(synchronize_session=False)
+            db.query(JourneySummary).filter(JourneySummary.client_id.in_(client_ids)).delete(synchronize_session=False)
+            db.query(LeadSummary).filter(LeadSummary.client_id.in_(client_ids)).delete(synchronize_session=False)
+            db.flush()
 
         journeys_added = 0
         leads_added = 0

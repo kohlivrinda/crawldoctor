@@ -1,5 +1,5 @@
 """Simplified analytics service for visitor categorization and page tracking."""
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Any, Optional
 import json
 from urllib.parse import urlparse, parse_qs
@@ -126,10 +126,10 @@ class AnalyticsService:
     ) -> Dict[str, Any]:
         """Get summary of visitors by category using optimized single-pass aggregation."""
         if start_date or end_date:
-            since = start_date or (datetime.now() - timedelta(days=days))
+            since = start_date or (datetime.now(timezone.utc) - timedelta(days=days))
             until = end_date
         else:
-            since = datetime.now() - timedelta(days=days)
+            since = datetime.now(timezone.utc) - timedelta(days=days)
             until = None
         
         # Optimized: Single query for all visit counts using conditional aggregation
@@ -153,7 +153,9 @@ class AnalyticsService:
         if until:
             event_filters.append(VisitEvent.timestamp <= until)
             
-        conversions = db.query(func.count(VisitEvent.id)).filter(
+        conversions = db.query(
+            func.count(func.distinct(func.coalesce(VisitEvent.client_id, VisitEvent.session_id)))
+        ).filter(
             *event_filters,
             VisitEvent.event_type == 'form_submit'
         ).scalar() or 0
@@ -206,6 +208,47 @@ class AnalyticsService:
             "period_days": days
         }
 
+    def _step_uid_ts_subquery(
+        self,
+        db: Session,
+        step: Dict[str, Any],
+        start_date: Optional[datetime],
+        end_date: Optional[datetime],
+    ):
+        """Return a subquery of (uid, min_ts) for a single funnel step."""
+        step_type = step.get("type", "page")
+        path = step.get("path", "")
+
+        if step_type == "event":
+            event_type = step.get("event_type", "form_submit")
+            uid_col = func.coalesce(VisitEvent.client_id, VisitEvent.session_id)
+            q = db.query(
+                uid_col.label("uid"),
+                func.min(VisitEvent.timestamp).label("min_ts"),
+            )
+            if start_date:
+                q = q.filter(VisitEvent.timestamp >= start_date)
+            if end_date:
+                q = q.filter(VisitEvent.timestamp <= end_date)
+            q = q.filter(VisitEvent.event_type == event_type)
+            q = q.filter(VisitEvent.path.ilike(f"{path}%"))
+            q = q.filter(text("event_data::text NOT LIKE '%timingsV2%'"))
+            q = q.filter(text("event_data::text NOT LIKE '%memory.totalJSHeapSize%'"))
+            q = q.filter(text("event_data::text NOT LIKE '%eventType%'"))
+        else:
+            uid_col = func.coalesce(Visit.client_id, Visit.session_id)
+            q = db.query(
+                uid_col.label("uid"),
+                func.min(Visit.timestamp).label("min_ts"),
+            )
+            if start_date:
+                q = q.filter(Visit.timestamp >= start_date)
+            if end_date:
+                q = q.filter(Visit.timestamp <= end_date)
+            q = q.filter(Visit.path.ilike(f"{path}%"))
+
+        return q.group_by(uid_col).subquery()
+
     def get_funnel_summary(
         self,
         db: Session,
@@ -213,128 +256,48 @@ class AnalyticsService:
         end_date: Optional[datetime] = None,
         config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Get funnel summary for configured conversion paths using robust user tracking."""
-        
-        # Base filter conditions
-        time_filters = []
-        if start_date:
-            time_filters.append(text("timestamp >= :start_date"))
-        if end_date:
-            time_filters.append(text("timestamp <= :end_date"))
-            
-        params = {"start_date": start_date, "end_date": end_date}
-        
+        """Get funnel summary with strict temporal ordering between steps."""
+
         funnels = (config or DEFAULT_FUNNEL_CONFIG).get("funnels", [])
         funnel_results = []
-        
+
         for funnel in funnels:
             steps = funnel.get("steps", [])
             stages = []
-            
-            # For the first step, we find all unique users
-            # For subsequent steps, we only count users who completed the previous step
-            
-            # We'll use a set of CTEs to track progress
-            # This logic mimics the user's "Journey" logic: finding distinct users at each stage
-            
-            prev_stage_cte = None
-            
-            for i, step in enumerate(steps):
-                step_type = step.get("type", "page")
-                path = step.get("path", "")
-                label = step.get("label") or path or step_type
-                
-                stage_name = f"stage_{i}"
-                
-                # Construct condition
-                if step_type == "event":
-                    event_type = step.get("event_type", "form_submit")
-                    # Check visit_events table
-                    # Note: We need to handle the join/union carefully or query separately
-                    # For simplicity/performance in this refactor, we'll use a direct count query
-                    # But to ensure funnel flow (step 1 -> step 2), we need to chain them
-                    pass 
-                
-                # REFACTOR STRATEGY: 
-                # Instead of complex dynamic CTEs in Python string building which is error prone,
-                # let's use the same logic as the "user_base" CTE but iteratively filter.
-                
-                # Define the base population for this step
-                if i == 0:
-                    # Step 1: All users who matched this condition
-                     if step_type == "event":
-                        query = db.query(
-                            func.count(func.distinct(func.coalesce(VisitEvent.client_id, VisitEvent.session_id)))
-                        ).filter(*[text(c) for c in map(str, time_filters) if c]) # hacky param binding check
-                        
-                        # Use proper SQLAlchemy filters
-                        q = db.query(func.count(func.distinct(func.coalesce(VisitEvent.client_id, VisitEvent.session_id))))
-                        if start_date: q = q.filter(VisitEvent.timestamp >= start_date)
-                        if end_date: q = q.filter(VisitEvent.timestamp <= end_date)
-                        
-                        event_type = step.get("event_type", "form_submit")
-                        q = q.filter(VisitEvent.event_type == event_type)
-                        q = q.filter(VisitEvent.path.ilike(f"{path}%"))
-                        count = q.scalar() or 0
-                     else:
-                        q = db.query(func.count(func.distinct(func.coalesce(Visit.client_id, Visit.session_id))))
-                        if start_date: q = q.filter(Visit.timestamp >= start_date)
-                        if end_date: q = q.filter(Visit.timestamp <= end_date)
-                        q = q.filter(Visit.path.ilike(f"{path}%"))
-                        count = q.scalar() or 0
-                else:
-                    # Subsequent steps: must be in previous step's users AND match strict time ordering
-                    # This is hard to do efficiently with simple ORM chaining.
-                    # We will use the "Recursive subset" approach used in the previous implementation
-                    # BUT updated to use COALESCE(client_id, session_id)
-                    pass
+            prev_sub = None
 
-            # Alternative: Since we want "Refactoring", let's rewrite the loop using consistent ID logic
-            current_ids_query = None
-            
             for step in steps:
-                step_type = step.get("type", "page")
-                path = step.get("path", "")
-                label = step.get("label") or path or step_type
-                
-                if step_type == "event":
-                    # Event table
-                    event_type = step.get("event_type", "form_submit")
-                    q = db.query(func.coalesce(VisitEvent.client_id, VisitEvent.session_id).label('uid'))
-                    if start_date: q = q.filter(VisitEvent.timestamp >= start_date)
-                    if end_date: q = q.filter(VisitEvent.timestamp <= end_date)
-                    q = q.filter(VisitEvent.event_type == event_type)
-                    q = q.filter(VisitEvent.path.ilike(f"{path}%"))
-                    
-                    # Filter out performance/RUM noise
-                    q = q.filter(text("event_data::text NOT LIKE '%timingsV2%'"))
-                    q = q.filter(text("event_data::text NOT LIKE '%memory.totalJSHeapSize%'"))
-                    q = q.filter(text("event_data::text NOT LIKE '%eventType%'"))
+                label = step.get("label") or step.get("path") or step.get("type", "page")
+                cur_sub = self._step_uid_ts_subquery(db, step, start_date, end_date)
+
+                if prev_sub is None:
+                    # First step — count all unique users
+                    count = db.execute(
+                        select(func.count()).select_from(cur_sub)
+                    ).scalar() or 0
                 else:
-                    # Visit table
-                    q = db.query(func.coalesce(Visit.client_id, Visit.session_id).label('uid'))
-                    if start_date: q = q.filter(Visit.timestamp >= start_date)
-                    if end_date: q = q.filter(Visit.timestamp <= end_date)
-                    q = q.filter(Visit.path.ilike(f"{path}%"))
+                    # Subsequent steps — only users present in the previous step
+                    # whose step-N min_ts >= step-(N-1) min_ts (temporal ordering).
+                    joined = (
+                        select(cur_sub.c.uid, cur_sub.c.min_ts)
+                        .join(prev_sub, cur_sub.c.uid == prev_sub.c.uid)
+                        .where(cur_sub.c.min_ts >= prev_sub.c.min_ts)
+                        .subquery()
+                    )
+                    count = db.execute(
+                        select(func.count()).select_from(joined)
+                    ).scalar() or 0
+                    # Use the joined result (with filtered users) as the base for
+                    # the next step so the temporal chain is maintained.
+                    cur_sub = joined
 
-                if current_ids_query is not None:
-                    # Filter to users who were in the previous step
-                    # Note: strict funnel (step N AFTER step N-1) is expensive.
-                    # Standard funnel usually implies "Did Step 1 AND Did Step 2 (at any time in period)"
-                    # or "Did Step 1 ... then Step 2".
-                    # The previous impl did `client_col.in_(select(current_ids...))`.
-                    # We'll do the same but with the coalesced ID.
-                    q = q.filter(func.coalesce(Visit.client_id if step_type!='event' else VisitEvent.client_id, 
-                                               Visit.session_id if step_type!='event' else VisitEvent.session_id).in_(current_ids_query))
-
-                # Capture independent subquery for next iteration to prevent strict nesting issues
-                current_ids_query = q.distinct().subquery().select()
-                
-                # Execute count for this stage
-                # We need to run a count on the distinct IDs
-                count = db.execute(select(func.count()).select_from(current_ids_query)).scalar() or 0
-                
-                stages.append({"label": label, "count": count, "type": step_type, "path": path})
+                prev_sub = cur_sub
+                stages.append({
+                    "label": label,
+                    "count": count,
+                    "type": step.get("type", "page"),
+                    "path": step.get("path", ""),
+                })
 
             # Calculate rates
             rates = []
@@ -684,25 +647,99 @@ class AnalyticsService:
 
         stage_seen_map = {row.client_id: row.stage_ts for row in stage_times}
 
+        # Batch-fetch first/last visits for all client_ids (avoids N+1)
+        first_visit_subq = (
+            db.query(
+                Visit.client_id.label("client_id"),
+                func.min(Visit.timestamp).label("first_ts"),
+            )
+            .filter(Visit.client_id.in_(client_ids))
+        )
+        last_visit_subq = (
+            db.query(
+                Visit.client_id.label("client_id"),
+                func.max(Visit.timestamp).label("last_ts"),
+            )
+            .filter(Visit.client_id.in_(client_ids))
+        )
+        # Apply date filters to the visit lookups
+        if start_date:
+            first_visit_subq = first_visit_subq.filter(Visit.timestamp >= start_date)
+            last_visit_subq = last_visit_subq.filter(Visit.timestamp >= start_date)
+        if end_date:
+            first_visit_subq = first_visit_subq.filter(Visit.timestamp <= end_date)
+            last_visit_subq = last_visit_subq.filter(Visit.timestamp <= end_date)
+
+        first_visit_subq = first_visit_subq.group_by(Visit.client_id).subquery()
+        last_visit_subq = last_visit_subq.group_by(Visit.client_id).subquery()
+
+        first_visits = (
+            db.query(Visit)
+            .join(first_visit_subq, and_(
+                Visit.client_id == first_visit_subq.c.client_id,
+                Visit.timestamp == first_visit_subq.c.first_ts,
+            ))
+            .all()
+        )
+        last_visits = (
+            db.query(Visit)
+            .join(last_visit_subq, and_(
+                Visit.client_id == last_visit_subq.c.client_id,
+                Visit.timestamp == last_visit_subq.c.last_ts,
+            ))
+            .all()
+        )
+        first_map = {v.client_id: v for v in first_visits}
+        last_map = {v.client_id: v for v in last_visits}
+
+        # Batch-fetch most recent form_submit event per client
+        latest_event_subq = (
+            db.query(
+                VisitEvent.client_id.label("client_id"),
+                func.max(VisitEvent.timestamp).label("max_ts"),
+            )
+            .filter(
+                VisitEvent.client_id.in_(client_ids),
+                VisitEvent.event_type == "form_submit",
+            )
+            .group_by(VisitEvent.client_id)
+            .subquery()
+        )
+        captured_events = (
+            db.query(VisitEvent)
+            .join(latest_event_subq, and_(
+                VisitEvent.client_id == latest_event_subq.c.client_id,
+                VisitEvent.timestamp == latest_event_subq.c.max_ts,
+            ))
+            .filter(VisitEvent.event_type == "form_submit")
+            .all()
+        )
+        captured_map = {e.client_id: e for e in captured_events}
+
+        # Batch-fetch path sequences (visit paths in order, within date range)
+        all_visits_q = (
+            db.query(Visit.client_id, Visit.path, Visit.timestamp)
+            .filter(Visit.client_id.in_(client_ids), Visit.path.isnot(None))
+        )
+        if start_date:
+            all_visits_q = all_visits_q.filter(Visit.timestamp >= start_date)
+        if end_date:
+            all_visits_q = all_visits_q.filter(Visit.timestamp <= end_date)
+        all_visits_rows = all_visits_q.order_by(Visit.client_id, Visit.timestamp.asc()).all()
+
+        path_map: Dict[str, str] = {}
+        from itertools import groupby as _groupby
+        for cid, rows in _groupby(all_visits_rows, key=lambda r: r.client_id):
+            path_map[cid] = " → ".join(r.path for r in rows if r.path)
+
         users = []
         for cid in client_ids:
-            visits = (
-                db.query(Visit)
-                .filter(Visit.client_id == cid)
-                .order_by(Visit.timestamp.asc())
-                .all()
-            )
-            if not visits:
+            first = first_map.get(cid)
+            last = last_map.get(cid)
+            if not first:
                 continue
 
-            first = visits[0]
-            last = visits[-1]
-
-            captured_event = db.query(VisitEvent).filter(
-                VisitEvent.client_id == cid,
-                VisitEvent.event_type == "form_submit",
-            ).order_by(VisitEvent.timestamp.desc()).first()
-
+            captured_event = captured_map.get(cid)
             captured_values = None
             captured_page = None
             captured_at = None
@@ -720,9 +757,8 @@ class AnalyticsService:
                     if not name and "name" in key.lower():
                         name = value
 
-            path_sequence = " → ".join([v.path or "" for v in visits if v.path])
             duration_seconds = None
-            if first.timestamp and last.timestamp:
+            if first.timestamp and last and last.timestamp:
                 duration_seconds = int((last.timestamp - first.timestamp).total_seconds())
 
             stage_seen_at = stage_seen_map.get(cid)
@@ -730,9 +766,9 @@ class AnalyticsService:
                 "client_id": cid,
                 "stage_reached_at": stage_seen_at.isoformat() if stage_seen_at else None,
                 "first_seen": first.timestamp.isoformat() if first.timestamp else None,
-                "last_seen": last.timestamp.isoformat() if last.timestamp else None,
+                "last_seen": last.timestamp.isoformat() if last and last.timestamp else None,
                 "entry_page": first.page_url,
-                "exit_page": last.page_url,
+                "exit_page": last.page_url if last else first.page_url,
                 "source": first.source or "direct",
                 "medium": first.medium or "none",
                 "campaign": first.campaign or "none",
@@ -743,7 +779,7 @@ class AnalyticsService:
                 "captured_at": captured_at,
                 "email": email,
                 "name": name,
-                "path_sequence": path_sequence,
+                "path_sequence": path_map.get(cid, ""),
                 "duration_seconds": duration_seconds,
             })
 
@@ -775,10 +811,10 @@ class AnalyticsService:
     ) -> Dict[str, Any]:
         """Get analytics by page."""
         if start_date or end_date:
-            since = start_date or (datetime.now() - timedelta(days=days))
+            since = start_date or (datetime.now(timezone.utc) - timedelta(days=days))
             until = end_date
         else:
-            since = datetime.now() - timedelta(days=days)
+            since = datetime.now(timezone.utc) - timedelta(days=days)
             until = None
         
         # Get visits by page domain
@@ -846,7 +882,7 @@ class AnalyticsService:
         
         # Default to last 7 days to avoid full table scans if no range is provided
         if not start_date and not end_date:
-            start_date = datetime.now() - timedelta(days=7)
+            start_date = datetime.now(timezone.utc) - timedelta(days=7)
         
         # Try to get data with retries
         for attempt in range(max_retries):
@@ -1527,22 +1563,23 @@ class AnalyticsService:
                 # Manual cleanup approach - delete all possible dependent records first
                 dependent_deletions = []
                 
-                # List of potential dependent tables to clean up
+                # Only clean up known FK-dependent tables — never visit_events,
+                # which holds valuable event data unrelated to visit deletion.
                 dependent_tables = [
-                    "crawler_visit_logs",  # This is the one causing the error
+                    "crawler_visit_logs",
                     "tracking_events",
-                    "crawler_logs", 
+                    "crawler_logs",
                     "analytics_summaries",
-                    "visit_events",
-                    "crawler_patterns"
+                    "crawler_patterns",
                 ]
-                
+
                 for table in dependent_tables:
                     try:
                         result = db.execute(text(f"DELETE FROM {table}"))
                         count = result.rowcount if hasattr(result, 'rowcount') else 0
                         if count > 0:
                             dependent_deletions.append(f"{table}: {count}")
+                            logger.info("Deleted dependent table rows", table=table, count=count)
                         db.commit()
                     except Exception:
                         db.rollback()
@@ -1598,11 +1635,10 @@ class AnalyticsService:
                 }
 
             updated_count = 0
-            offset = 0
 
-            # Process in batches to avoid memory issues
-            while offset < total_to_update:
-                # Get a batch of visits that need updating
+            # Process in batches — always query from offset 0 because updated
+            # rows drop out of the filter on the next iteration.
+            while True:
                 batch = db.query(Visit).options(
                     joinedload(Visit.session)
                 ).join(
@@ -1614,21 +1650,19 @@ class AnalyticsService:
                         and_(Visit.city.is_(None), VisitSession.city.isnot(None)),
                         and_(Visit.city == "Unknown", VisitSession.city.isnot(None))
                     )
-                ).offset(offset).limit(batch_size).all()
+                ).limit(batch_size).all()
 
                 if not batch:
                     break
 
-                # Update the batch
+                batch_updated = 0
                 for visit in batch:
                     if visit.session:
                         changed = False
-                        # Update country if visit has bad data but session has good data
                         if (not visit.country or visit.country == "XX") and visit.session.country and visit.session.country != "XX":
                             visit.country = visit.session.country
                             changed = True
 
-                        # Update city if visit has bad data but session has good data
                         if (not visit.city or visit.city == "Unknown") and visit.session.city and visit.session.city != "Unknown":
                             visit.city = visit.session.city
                             changed = True
@@ -1636,15 +1670,14 @@ class AnalyticsService:
                         if changed:
                             db.add(visit)
                             updated_count += 1
+                            batch_updated += 1
 
-                # Commit the batch
                 db.commit()
                 logger.info(f"Backfilled location for {len(batch)} visits (total: {updated_count}/{total_to_update})")
 
-                offset += batch_size
-
-                # If batch was smaller than batch_size, we're done
-                if len(batch) < batch_size:
+                # If nothing in this batch was updatable (session has no good data either),
+                # the same rows would be fetched again — break to avoid infinite loop.
+                if batch_updated == 0:
                     break
 
             return {
@@ -1683,11 +1716,10 @@ class AnalyticsService:
                 }
 
             updated_count = 0
-            offset = 0
 
-            # Process in batches to avoid memory issues
-            while offset < total_to_update:
-                # Get a batch of sessions that need updating
+            # Process in batches — always query from offset 0 because updated
+            # rows drop out of the filter on the next iteration.
+            while True:
                 batch = db.query(VisitSession).filter(
                     db.or_(
                         VisitSession.country.is_(None),
@@ -1695,16 +1727,15 @@ class AnalyticsService:
                         and_(VisitSession.city.is_(None)),
                         and_(VisitSession.city == "Unknown")
                     )
-                ).offset(offset).limit(batch_size).all()
+                ).limit(batch_size).all()
 
                 if not batch:
                     break
 
-                # For each session, find the best location from its visits
+                batch_updated = 0
                 for session in batch:
                     changed = False
 
-                    # Find visits for this session that have good location data
                     best_visit = db.query(Visit).filter(
                         Visit.session_id == session.id,
                         Visit.country.isnot(None),
@@ -1712,7 +1743,6 @@ class AnalyticsService:
                     ).order_by(Visit.timestamp.desc()).first()
 
                     if best_visit:
-                        # Update session with best visit's location
                         if (not session.country or session.country == "XX") and best_visit.country:
                             session.country = best_visit.country
                             changed = True
@@ -1724,15 +1754,12 @@ class AnalyticsService:
                         if changed:
                             db.add(session)
                             updated_count += 1
+                            batch_updated += 1
 
-                # Commit the batch
                 db.commit()
                 logger.info(f"Backfilled location for {len(batch)} sessions (total: {updated_count}/{total_to_update})")
 
-                offset += batch_size
-
-                # If batch was smaller than batch_size, we're done
-                if len(batch) < batch_size:
+                if batch_updated == 0:
                     break
 
             return {
@@ -1759,10 +1786,10 @@ class AnalyticsService:
     ) -> Dict[str, Any]:
         """Get detailed visitor categorization."""
         if start_date or end_date:
-            since = start_date or (datetime.now() - timedelta(days=days))
+            since = start_date or (datetime.now(timezone.utc) - timedelta(days=days))
             until = end_date
         else:
-            since = datetime.now() - timedelta(days=days)
+            since = datetime.now(timezone.utc) - timedelta(days=days)
             until = None
         
         filters = [Visit.timestamp >= since]
@@ -2262,7 +2289,7 @@ class AnalyticsService:
 
     def get_page_flow_summary(self, db: Session, days: int = 7, limit: int = 100) -> Dict[str, Any]:
         """Summarize page-to-page flows across sessions."""
-        since = datetime.now() - timedelta(days=days)
+        since = datetime.now(timezone.utc) - timedelta(days=days)
         rows = db.execute(
             text(
                 """

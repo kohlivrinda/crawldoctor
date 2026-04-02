@@ -59,6 +59,7 @@ class SessionBackfillService:
         logger.info("Session backfill starting", dry_run=dry_run)
         try:
             db.execute(text("SET statement_timeout = 600000"))  # 10 min
+            db.execute(text("SET work_mem = '256MB'"))
         except Exception:
             pass
 
@@ -92,55 +93,81 @@ class SessionBackfillService:
     # Step 1+2: Load records grouped by user identity, sorted by time
     # ------------------------------------------------------------------
 
+    # How wide each time-range page is when loading records.  Keeps
+    # individual queries small so the remote Postgres doesn't OOM.
+    _LOAD_WINDOW = timedelta(days=7)
+
     def _load_records(self, db: Session) -> Dict[str, List[dict]]:
         """Load visits + events since BACKFILL_START, grouped by best user key.
 
         Returns {user_key: [record, ...]} sorted ascending by timestamp.
         Each record is a lightweight dict (not the ORM object) to keep
         memory manageable on large tables.
+
+        The query is paginated in weekly windows so that no single query
+        needs to sort / stream the entire table.
         """
         user_records: Dict[str, List[dict]] = defaultdict(list)
 
-        # -- Visits --
-        visits = (
-            db.query(
-                Visit.id,
-                Visit.session_id,
-                Visit.client_id,
-                Visit.ip_address,
-                Visit.user_agent,
-                Visit.timestamp,
-                Visit.page_url,
-                Visit.page_domain,
-                Visit.referrer,
-                Visit.source,
-                Visit.medium,
-                Visit.campaign,
-            )
-            .filter(Visit.timestamp >= BACKFILL_START)
-            .order_by(Visit.timestamp.asc())
-            .yield_per(2000)
-        )
+        now = datetime.now(tz=timezone.utc)
+        window_start = BACKFILL_START
+        window_num = 0
 
-        for row in visits:
-            rec = {
-                "type": "visit",
-                "id": row.id,
-                "old_session_id": row.session_id,
-                "client_id": row.client_id,
-                "ip_address": row.ip_address,
-                "user_agent": (row.user_agent or "")[:500],
-                "timestamp": row.timestamp,
-                "page_url": row.page_url,
-                "page_domain": row.page_domain,
-                "referrer": row.referrer,
-                "referrer_domain": self._extract_domain(row.referrer),
-                "source": row.source,
-                "medium": row.medium,
-                "campaign": row.campaign,
-            }
-            key = self._user_key(rec)
-            user_records[key].append(rec)
+        while window_start < now:
+            window_end = min(window_start + self._LOAD_WINDOW, now)
+            window_num += 1
+            logger.info(
+                "Loading visit window",
+                window=window_num,
+                start=window_start.isoformat(),
+                end=window_end.isoformat(),
+            )
+
+            visits = (
+                db.query(
+                    Visit.id,
+                    Visit.session_id,
+                    Visit.client_id,
+                    Visit.ip_address,
+                    Visit.user_agent,
+                    Visit.timestamp,
+                    Visit.page_url,
+                    Visit.page_domain,
+                    Visit.referrer,
+                    Visit.source,
+                    Visit.medium,
+                    Visit.campaign,
+                )
+                .filter(Visit.timestamp >= window_start)
+                .filter(Visit.timestamp < window_end)
+                .order_by(Visit.timestamp.asc())
+                .yield_per(500)
+            )
+
+            count = 0
+            for row in visits:
+                rec = {
+                    "type": "visit",
+                    "id": row.id,
+                    "old_session_id": row.session_id,
+                    "client_id": row.client_id,
+                    "ip_address": row.ip_address,
+                    "user_agent": (row.user_agent or "")[:500],
+                    "timestamp": row.timestamp,
+                    "page_url": row.page_url,
+                    "page_domain": row.page_domain,
+                    "referrer": row.referrer,
+                    "referrer_domain": self._extract_domain(row.referrer),
+                    "source": row.source,
+                    "medium": row.medium,
+                    "campaign": row.campaign,
+                }
+                key = self._user_key(rec)
+                user_records[key].append(rec)
+                count += 1
+
+            logger.info("Window loaded", window=window_num, records=count)
+            window_start = window_end
 
         # Sort each user's visits by timestamp
         for key in user_records:
@@ -380,6 +407,7 @@ class SessionBackfillService:
             )
             try:
                 db.execute(text(sql), params)
+                db.commit()
                 created += len(chunk)
             except Exception as e:
                 db.rollback()
@@ -387,38 +415,34 @@ class SessionBackfillService:
                 if skipped <= 2500:
                     logger.warning("Batch insert failed", error=str(e)[:200])
 
-            if (i // batch_size) % 10 == 0:
+            if (i // batch_size) % 20 == 0:
                 logger.info("Sessions insert progress", done=min(i + batch_size, len(to_insert)), total=len(to_insert))
-
-        db.commit()
         logger.info("Session rows created", created=created, skipped=skipped)
 
-        # 5a. Remap visits in bulk batches
+        # 5a. Remap visits — VALUES-join update (constant time per batch,
+        # unlike the old CASE approach which degraded as the transaction grew).
         logger.info("Remapping visits", count=len(visit_updates))
         visit_items = list(visit_updates.items())
         for i in range(0, len(visit_items), batch_size):
             chunk = visit_items[i:i+batch_size]
-            # Use a temp table approach via CTE for clean parameterization
             params = {}
-            case_parts = []
-            id_params = []
+            values_parts = []
             for j, (vid, new_sid) in enumerate(chunk):
                 params[f"v{j}"] = vid
                 params[f"s{j}"] = new_sid
-                case_parts.append(f"WHEN id = :v{j} THEN :s{j}")
-                id_params.append(f":v{j}")
+                values_parts.append(f"(:v{j}, :s{j})")
             sql = (
-                f"UPDATE visits SET session_id = CASE {' '.join(case_parts)} END "
-                f"WHERE id IN ({','.join(id_params)})"
+                f"UPDATE visits SET session_id = _map.new_sid "
+                f"FROM (VALUES {','.join(values_parts)}) AS _map(vid, new_sid) "
+                f"WHERE visits.id = _map.vid"
             )
             db.execute(text(sql), params)
-            if (i // batch_size) % 10 == 0:
-                db.commit()
+            db.commit()
+            if (i // batch_size) % 20 == 0:
                 logger.info("Visits remapped progress", done=min(i + batch_size, len(visit_items)), total=len(visit_items))
-        db.commit()
         logger.info("Visits remapped done")
 
-        # 5b. Remap events — bulk update by old→new session_id
+        # 5b. Remap events — same VALUES-join approach
         old_to_new_session: Dict[str, str] = {}
         for entry in audit_log:
             old_to_new_session[entry["old_session_id"]] = entry["new_session_id"]
@@ -428,22 +452,20 @@ class SessionBackfillService:
         for i in range(0, len(mapping_items), batch_size):
             chunk = mapping_items[i:i+batch_size]
             params = {}
-            case_parts = []
-            id_params = []
+            values_parts = []
             for j, (old_sid, new_sid) in enumerate(chunk):
                 params[f"o{j}"] = old_sid
                 params[f"n{j}"] = new_sid
-                case_parts.append(f"WHEN session_id = :o{j} THEN :n{j}")
-                id_params.append(f":o{j}")
+                values_parts.append(f"(:o{j}, :n{j})")
             sql = (
-                f"UPDATE visit_events SET session_id = CASE {' '.join(case_parts)} END "
-                f"WHERE session_id IN ({','.join(id_params)})"
+                f"UPDATE visit_events SET session_id = _map.new_sid "
+                f"FROM (VALUES {','.join(values_parts)}) AS _map(old_sid, new_sid) "
+                f"WHERE visit_events.session_id = _map.old_sid"
             )
             db.execute(text(sql), params)
-            if (i // batch_size) % 10 == 0:
-                db.commit()
+            db.commit()
+            if (i // batch_size) % 20 == 0:
                 logger.info("Events remapped progress", done=min(i + batch_size, len(mapping_items)), total=len(mapping_items))
-        db.commit()
         logger.info("Events remapped done")
 
         # 6b. Write audit log
@@ -465,9 +487,9 @@ class SessionBackfillService:
                 f"VALUES {','.join(values_parts)}"
             )
             db.execute(text(sql), params)
-            if (i // batch_size) % 10 == 0:
-                db.commit()
-        db.commit()
+            db.commit()
+            if (i // batch_size) % 20 == 0:
+                logger.info("Audit log progress", done=min(i + batch_size, len(audit_log)), total=len(audit_log))
         logger.info("Audit log done")
 
         # 7. Delete orphaned session rows — both remapped old sessions and
@@ -490,9 +512,7 @@ class SessionBackfillService:
             )
             result = db.execute(text(sql), params)
             deleted_remapped += result.rowcount
-            if (i // batch_size) % 10 == 0:
-                db.commit()
-        db.commit()
+            db.commit()
         logger.info("Remapped session rows deleted", deleted=deleted_remapped,
                      skipped=len(old_sids_to_delete) - deleted_remapped)
 

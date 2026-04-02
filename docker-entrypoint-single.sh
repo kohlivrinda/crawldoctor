@@ -68,26 +68,24 @@ else:
     exit(1)
 "
 
-# Run database migrations with Alembic (async to avoid blocking startup on large indexes)
-echo "🔧 Starting database migrations in background..."
-(
-    set +e
-    alembic upgrade head 2>&1 | tee /tmp/migration.log
-    MIGRATION_EXIT=$?
-    set -e
-    if [ $MIGRATION_EXIT -eq 0 ]; then
-        echo "✅ Database migrations completed"
+# Run database migrations with Alembic (must complete before app starts)
+echo "🔧 Running database migrations..."
+set +e
+alembic upgrade head 2>&1 | tee /tmp/migration.log
+MIGRATION_EXIT=$?
+set -e
+if [ $MIGRATION_EXIT -eq 0 ]; then
+    echo "✅ Database migrations completed"
+else
+    if grep -q "Can't locate revision" /tmp/migration.log; then
+        echo "🔧 Fixing orphaned migration state..."
+        handle_migration_error
+        alembic stamp 73f8498762a0 || true
+        alembic upgrade head || echo "⚠️  Migration skipped, continuing..."
     else
-        if grep -q "Can't locate revision" /tmp/migration.log; then
-            echo "🔧 Fixing orphaned migration state..."
-            handle_migration_error
-            alembic stamp 73f8498762a0 || true
-            alembic upgrade head || echo "⚠️  Migration skipped, continuing..."
-        else
-            echo "⚠️  Migration had issues, continuing with app startup..."
-        fi
+        echo "⚠️  Migration had issues, continuing with app startup..."
     fi
-) &
+fi
 
 # Initialize database (create tables if needed)
 python3 -c "
@@ -146,7 +144,7 @@ cleanup() {
 # Set trap for cleanup
 trap cleanup SIGTERM SIGINT
 
-# Wait for backend or nginx to exit (ignore background migrations)
+# Wait for backend or nginx to exit
 wait -n $NGINX_PID $BACKEND_PID
 EXIT_CODE=$?
 

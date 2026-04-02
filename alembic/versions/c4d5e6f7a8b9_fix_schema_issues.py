@@ -1,0 +1,43 @@
+"""Fix is_bot default, add updated_at to visit_sessions, add FK on journey_form_fills.visit_event_id
+
+Revision ID: c4d5e6f7a8b9
+Revises: b3f1a9c7d820
+Create Date: 2026-04-02
+
+"""
+from alembic import op
+import sqlalchemy as sa
+
+
+revision = 'c4d5e6f7a8b9'
+down_revision = 'b3f1a9c7d820'
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    # Fix is_bot default from TRUE to FALSE — new visits should not be assumed bots
+    op.alter_column(
+        'visits', 'is_bot',
+        server_default=sa.text('false'),
+    )
+
+    # Add updated_at column to visit_sessions for audit/staleness tracking
+    op.add_column(
+        'visit_sessions',
+        sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=True),
+    )
+
+    # Add foreign key on journey_form_fills.visit_event_id → visit_events.id
+    op.create_foreign_key(
+        'fk_journey_form_fills_visit_event_id',
+        'journey_form_fills', 'visit_events',
+        ['visit_event_id'], ['id'],
+        ondelete='SET NULL',
+    )
+
+
+def downgrade() -> None:
+    op.drop_constraint('fk_journey_form_fills_visit_event_id', 'journey_form_fills', type_='foreignkey')
+    op.drop_column('visit_sessions', 'updated_at')
+    op.alter_column('visits', 'is_bot', server_default=sa.text('true'))

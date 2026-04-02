@@ -623,35 +623,35 @@ class TrackingService:
             # Try to inherit location from existing sessions for this IP before creating new session
             existing_location = None
             try:
-                # Look for recent sessions with this IP that have good location data
-                recent_sessions = db.query(VisitSession).filter(
+                # Look for a recent session with this IP that has good location data
+                good_session = db.query(VisitSession).filter(
                     VisitSession.ip_address == ip_address,
-                    VisitSession.last_visit >= datetime.now(timezone.utc) - timedelta(hours=24)
-                ).all()
+                    VisitSession.last_visit >= datetime.now(timezone.utc) - timedelta(hours=24),
+                    VisitSession.country.isnot(None),
+                    VisitSession.country != "XX",
+                ).order_by(VisitSession.last_visit.desc()).first()
 
-                for existing_session in recent_sessions:
-                    if existing_session.country and existing_session.country != "XX":
-                        existing_location = {
-                            "country": existing_session.country,
-                            "city": existing_session.city,
-                            "country_name": existing_session.country_name
-                        }
-                        break
+                if good_session:
+                    existing_location = {
+                        "country": good_session.country,
+                        "city": good_session.city,
+                        "country_name": good_session.country_name,
+                    }
 
                 # If no good session data, try recent visits
                 if not existing_location:
-                    recent_visits = db.query(Visit).filter(
+                    good_visit = db.query(Visit).filter(
                         Visit.ip_address == ip_address,
-                        Visit.timestamp >= datetime.now(timezone.utc) - timedelta(hours=24)
-                    ).all()
+                        Visit.timestamp >= datetime.now(timezone.utc) - timedelta(hours=24),
+                        Visit.country.isnot(None),
+                        Visit.country != "XX",
+                    ).order_by(Visit.timestamp.desc()).first()
 
-                    for existing_visit in recent_visits:
-                        if existing_visit.country and existing_visit.country != "XX":
-                            existing_location = {
-                                "country": existing_visit.country,
-                                "city": existing_visit.city
-                            }
-                            break
+                    if good_visit:
+                        existing_location = {
+                            "country": good_visit.country,
+                            "city": good_visit.city,
+                        }
             except Exception:
                 pass  # If inheritance fails, continue with geo_info
 
@@ -685,29 +685,29 @@ class TrackingService:
 
                 # First, try to inherit from existing visits for this IP
                 try:
-                    recent_visits = db.query(Visit).filter(
+                    good_visit = db.query(Visit).filter(
                         Visit.ip_address == ip_address,
-                        Visit.timestamp >= datetime.now(timezone.utc) - timedelta(hours=24)
-                    ).all()
+                        Visit.timestamp >= datetime.now(timezone.utc) - timedelta(hours=24),
+                        Visit.country.isnot(None),
+                        Visit.country != "XX",
+                    ).order_by(Visit.timestamp.desc()).first()
 
-                    for existing_visit in recent_visits:
-                        if existing_visit.country and existing_visit.country != "XX":
-                            visit_country = existing_visit.country
-                            visit_city = existing_visit.city
-                            break
+                    if good_visit:
+                        visit_country = good_visit.country
+                        visit_city = good_visit.city
 
                     # If no good visit data, try sessions
                     if not visit_country:
-                        recent_sessions = db.query(VisitSession).filter(
+                        good_session = db.query(VisitSession).filter(
                             VisitSession.ip_address == ip_address,
-                            VisitSession.last_visit >= datetime.now(timezone.utc) - timedelta(hours=24)
-                        ).all()
+                            VisitSession.last_visit >= datetime.now(timezone.utc) - timedelta(hours=24),
+                            VisitSession.country.isnot(None),
+                            VisitSession.country != "XX",
+                        ).order_by(VisitSession.last_visit.desc()).first()
 
-                        for existing_session in recent_sessions:
-                            if existing_session.country and existing_session.country != "XX":
-                                visit_country = existing_session.country
-                                visit_city = existing_session.city
-                                break
+                        if good_session:
+                            visit_country = good_session.country
+                            visit_city = good_session.city
                 except Exception:
                     pass  # If inheritance fails, continue
 

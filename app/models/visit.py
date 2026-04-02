@@ -23,6 +23,7 @@ class VisitSession(Base):
     # Session tracking
     first_visit = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
     last_visit = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     visit_count = Column(Integer, default=0)
 
     # Journey entry context
@@ -80,7 +81,7 @@ class Visit(Base):
     # Crawler identification
     crawler_type = Column(String(100), index=True)
     crawler_confidence = Column(Float, default=1.0)
-    is_bot = Column(Boolean, default=True, index=True)
+    is_bot = Column(Boolean, default=False, index=True)
     
     # Request details
     request_method = Column(String(10), default="GET")
@@ -153,7 +154,10 @@ class VisitEvent(Base):
     medium = Column(String(100), index=True)
     campaign = Column(String(100), index=True)
 
-    # Event payload
+    # Event payload — unversioned JSON. Known shapes:
+    #   form_submit: {"form_values": {field: value, ...}, "filled_fields": int, "id": str, "action": str}
+    #   Also seen:   {"values": {field: value, ...}} (legacy alias for form_values)
+    #   Consumers must handle both "form_values" and "values" keys.
     event_data = Column(JSON)
     
     # Client-side captured data

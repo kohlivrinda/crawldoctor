@@ -1,5 +1,5 @@
 """Simplified analytics API for visitor insights."""
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 from fastapi import APIRouter, Depends, Query, HTTPException
 from fastapi.responses import StreamingResponse
@@ -32,8 +32,8 @@ async def get_visitor_summary(
 ):
     """Get visitor summary by category."""
     try:
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59) if end_date else None
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc) if start_date else None
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=timezone.utc) if end_date else None
         return analytics_service.get_visitor_summary(db, days=days, start_date=start_dt, end_date=end_dt)
     except Exception as e:
         logger.error("Failed to get visitor summary", error=str(e))
@@ -49,8 +49,8 @@ async def get_funnel_summary(
 ):
     """Get funnel summaries for key conversion paths."""
     try:
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59) if end_date else None
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc) if start_date else None
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=timezone.utc) if end_date else None
         config = analytics_service.get_funnel_config(db, current_user.id)
         return analytics_service.get_funnel_summary(db, start_date=start_dt, end_date=end_dt, config=config)
     except Exception as e:
@@ -113,8 +113,8 @@ async def get_funnel_timing(
 ):
     """Get time-to-convert metrics for a funnel."""
     try:
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59) if end_date else None
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc) if start_date else None
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=timezone.utc) if end_date else None
         config = analytics_service.get_funnel_config(db, current_user.id)
         data = analytics_service.get_funnel_time_metrics(
             db,
@@ -147,8 +147,8 @@ async def get_funnel_dropoffs(
 ):
     """Get users who dropped off after a given funnel step."""
     try:
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59) if end_date else None
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc) if start_date else None
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=timezone.utc) if end_date else None
         config = analytics_service.get_funnel_config(db, current_user.id)
         data = analytics_service.get_funnel_dropoffs(
             db,
@@ -185,8 +185,8 @@ async def get_funnel_stage_users(
 ):
     """Get users who reached a funnel stage with journey details."""
     try:
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59) if end_date else None
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc) if start_date else None
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=timezone.utc) if end_date else None
         config = analytics_service.get_funnel_config(db, current_user.id)
         data = analytics_service.get_funnel_stage_users(
             db,
@@ -220,8 +220,8 @@ async def get_page_analytics(
 ):
     """Get page analytics."""
     try:
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59) if end_date else None
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc) if start_date else None
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=timezone.utc) if end_date else None
         return analytics_service.get_page_analytics(db, days=days, start_date=start_dt, end_date=end_dt)
     except Exception as e:
         logger.error("Failed to get page analytics", error=str(e))
@@ -239,8 +239,8 @@ async def get_recent_activity(
 ):
     """Get recent visitor activity with pagination."""
     try:
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59) if end_date else None
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc) if start_date else None
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=timezone.utc) if end_date else None
         return analytics_service.get_recent_activity(db, limit=limit, offset=offset, start_date=start_dt, end_date=end_dt)
     except Exception as e:
         logger.error("Failed to get recent activity", error=str(e))
@@ -291,8 +291,8 @@ async def get_visitor_categories(
 ):
     """Get detailed visitor categorization."""
     try:
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59) if end_date else None
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc) if start_date else None
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=timezone.utc) if end_date else None
         return analytics_service.get_visitor_categories(db, days=days, start_date=start_dt, end_date=end_dt)
     except Exception as e:
         logger.error("Failed to get visitor categories", error=str(e))
@@ -346,10 +346,10 @@ async def list_journeys(
 ):
     """List journey summaries grouped by client_id with optional filters."""
     try:
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59) if end_date else None
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc) if start_date else None
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=timezone.utc) if end_date else None
         if not start_dt and not end_dt:
-            start_dt = datetime.now() - timedelta(days=30)
+            start_dt = datetime.now(timezone.utc) - timedelta(days=30)
         return analytics_service.list_journey_summaries(
             db,
             target_path=target_path,
@@ -376,8 +376,8 @@ async def export_journeys_csv(
 ):
     """Export journeys as CSV with optional filters."""
     try:
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59) if end_date else None
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc) if start_date else None
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=timezone.utc) if end_date else None
         
         def generate_csv():
             output = io.StringIO()
@@ -436,10 +436,10 @@ async def list_leads(
 ):
     """List captured leads with summary details."""
     try:
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59) if end_date else None
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc) if start_date else None
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=timezone.utc) if end_date else None
         if not start_dt and not end_dt:
-            start_dt = datetime.now() - timedelta(days=30)
+            start_dt = datetime.now(timezone.utc) - timedelta(days=30)
         return analytics_service.list_leads(
             db,
             captured_path=captured_path,
@@ -470,8 +470,8 @@ async def export_leads_csv(
 ):
     """Export captured leads as CSV with optional filters."""
     try:
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59) if end_date else None
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc) if start_date else None
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=timezone.utc) if end_date else None
         
         def generate_csv():
             output = io.StringIO()
@@ -538,6 +538,21 @@ async def get_lead_detail(
         raise HTTPException(status_code=500, detail="Failed to get lead detail")
 
 
+@router.get("/journeys/analyze")
+async def analyze_journey_path(
+    target_path: str = Query(..., description="Target path regex or string to analyze (e.g., /schedule)"),
+    days: int = Query(30, ge=1, le=90, description="Lookback window in days"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Analyze journeys for a specific target path using dynamic SQL."""
+    try:
+        return analytics_service.analyze_journey_path(db, target_path=target_path, days=days)
+    except Exception as e:
+        logger.error("Failed to analyze journey path", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to analyze journey path")
+
+
 @router.get("/journeys/{client_id}")
 async def get_user_journey(
     client_id: str,
@@ -567,21 +582,6 @@ async def get_page_flows(
     except Exception as e:
         logger.error("Failed to get page flows", error=str(e))
         raise HTTPException(status_code=500, detail="Failed to get page flows")
-
-
-@router.get("/journeys/analyze")
-async def analyze_journey_path(
-    target_path: str = Query(..., description="Target path regex or string to analyze (e.g., /schedule)"),
-    days: int = Query(30, ge=1, le=90, description="Lookback window in days"),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Analyze journeys for a specific target path using dynamic SQL."""
-    try:
-        return analytics_service.analyze_journey_path(db, target_path=target_path, days=days)
-    except Exception as e:
-        logger.error("Failed to analyze journey path", error=str(e))
-        raise HTTPException(status_code=500, detail="Failed to analyze journey path")
 
 
 @router.get("/export/csv")

@@ -79,7 +79,14 @@ async def init_db():
 
 
 def ensure_event_partitions() -> None:
-    """Ensure visit_events is partitioned and recent partitions exist."""
+    """Ensure visit_events is partitioned and recent partitions exist.
+
+    WARNING: This runs at app startup and only creates partitions for
+    event_partition_days_ahead into the future. If the app is not restarted
+    before those days elapse, inserts for future dates will fall into the
+    default partition. Consider moving partition maintenance to pg_cron
+    (e.g. ``SELECT cron.schedule('create_partitions', '0 0 * * *', ...)``).
+    """
     try:
         with engine.begin() as conn:
             # Check if visit_events table exists and its type
