@@ -116,6 +116,12 @@ class TrackingService:
         # Zero signal: no referrer, no source, no utm — new session
         return True
 
+    # Concurrent requests from the same user (e.g. page load + heartbeat)
+    # can both miss each other's session if they query before either commits.
+    # This window defines how far back to look when deduplicating sessions
+    # created in the same burst.
+    _SESSION_RACE_WINDOW = timedelta(seconds=30)
+
     def _resolve_existing_session(
         self,
         db: Session,
@@ -153,6 +159,61 @@ class TrackingService:
             return session
         except Exception:
             return None
+
+    def _dedup_racing_session(
+        self,
+        db: Session,
+        session: "VisitSession",
+        client_id: Optional[str],
+        ip_address: str,
+        user_agent: str,
+    ) -> "VisitSession":
+        """If another session was created for the same user within the race
+        window, merge into the older one to avoid session fragmentation.
+
+        Called right before committing a new session.
+        """
+        try:
+            cutoff = datetime.now(timezone.utc) - self._SESSION_RACE_WINDOW
+            if client_id:
+                older = (
+                    db.query(VisitSession)
+                    .filter(
+                        VisitSession.client_id == client_id,
+                        VisitSession.id != session.id,
+                        VisitSession.first_visit >= cutoff,
+                    )
+                    .order_by(VisitSession.first_visit.asc())
+                    .first()
+                )
+            else:
+                older = (
+                    db.query(VisitSession)
+                    .filter(
+                        VisitSession.ip_address == ip_address,
+                        VisitSession.user_agent == user_agent[:500],
+                        VisitSession.id != session.id,
+                        VisitSession.first_visit >= cutoff,
+                    )
+                    .order_by(VisitSession.first_visit.asc())
+                    .first()
+                )
+            if older:
+                logger.info(
+                    "Merging racing session",
+                    new_session=session.id[:12],
+                    into_session=older.id[:12],
+                    client_id=client_id[:12] if client_id else None,
+                )
+                # Discard the new session, reuse the older one
+                try:
+                    db.expunge(session)
+                except Exception:
+                    pass
+                return older
+        except Exception:
+            pass
+        return session
 
     def _next_journey_seq(
         self,
@@ -305,8 +366,12 @@ class TrackingService:
                 entry_referrer_domain=referrer_domain,
                 is_external_entry=is_new_session,
             )
+            # Check for a racing session created by a concurrent request
+            session = self._dedup_racing_session(db, session, client_id, ip_address, user_agent)
+            session_id = session.id
+            is_new_session = not db.object_session(session)
             # Add client-side data to session if provided
-            if client_side_data:
+            if is_new_session and client_side_data:
                 session.client_side_timezone = client_side_data.get('timezone')
                 session.client_side_language = client_side_data.get('language')
                 session.client_side_screen_resolution = client_side_data.get('screen_resolution')
@@ -572,6 +637,16 @@ class TrackingService:
         else:
             seq = self._next_journey_seq(db, ip_address, user_agent, client_id)
             session_id = self._generate_session_id(ip_address, user_agent, client_id, seq)
+            # Check for a racing session from a concurrent request
+            candidate = VisitSession(
+                id=session_id, ip_address=ip_address,
+                user_agent=user_agent[:500], client_id=client_id,
+                first_visit=datetime.now(timezone.utc),
+                last_visit=datetime.now(timezone.utc),
+            )
+            merged = self._dedup_racing_session(db, candidate, client_id, ip_address, user_agent)
+            if merged is not candidate:
+                session_id = merged.id
 
         # Define effective_session_id early - it will be refined later if needed
         effective_session_id = session_id
