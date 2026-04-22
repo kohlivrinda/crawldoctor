@@ -71,7 +71,7 @@ class EventBatcher:
                     break
 
             if batch:
-                self._flush_batch(batch)
+                await asyncio.to_thread(self._flush_batch, batch)
 
     def _flush_batch(self, batch: List[Dict[str, Any]]) -> None:
         db = SessionLocal()
@@ -92,7 +92,7 @@ class EventBatcher:
             except asyncio.QueueEmpty:
                 break
         if batch:
-            self._flush_batch(batch)
+            await asyncio.to_thread(self._flush_batch, batch)
 
 
 event_batcher = EventBatcher()

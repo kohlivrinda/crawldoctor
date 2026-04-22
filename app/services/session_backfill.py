@@ -12,6 +12,8 @@ Usage:
 """
 
 import hashlib
+import json
+import os
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple
@@ -21,6 +23,7 @@ from sqlalchemy import text, func
 from sqlalchemy.orm import Session
 import structlog
 
+from app.database import SessionLocal
 from app.models.visit import Visit, VisitSession, VisitEvent
 from app.utils.domains import is_internal_domain
 
@@ -59,185 +62,285 @@ class SessionBackfillService:
         logger.info("Session backfill starting", dry_run=dry_run)
         try:
             db.execute(text("SET statement_timeout = 600000"))  # 10 min
+            db.execute(text("SET work_mem = '32MB'"))
         except Exception:
             pass
 
-        # Step 1+2: Load and sort records by user identity + time
-        user_records = self._load_records(db)
-        logger.info("Loaded users for backfill", user_count=len(user_records))
+        # Try to load a cached plan from disk (avoids re-running the slow
+        # plan phase after crashes).
+        cache_path = os.path.join(os.path.dirname(__file__), ".backfill_plan_cache.json")
+        migration_plan = self._load_plan_cache(cache_path)
 
-        # Step 3-4: Assign journey groups and detect session boundaries
-        migration_plan = self._compute_migration_plan(user_records)
+        if migration_plan:
+            logger.info("Loaded plan from cache", visits=migration_plan["visits_remapped"],
+                        events=migration_plan["events_remapped"])
+        else:
+            migration_plan = self._stream_build_plan(db)
+            # Cache to disk so we never have to recompute
+            self._save_plan_cache(cache_path, migration_plan)
+            logger.info("Plan cached to disk", path=cache_path)
 
         stats = {
-            "users_processed": len(user_records),
+            "users_processed": migration_plan["users_processed"],
             "sessions_before": migration_plan["sessions_before"],
             "sessions_after": migration_plan["sessions_after"],
             "visits_remapped": migration_plan["visits_remapped"],
+            "events_remapped": migration_plan["events_remapped"],
             "audit_rows": len(migration_plan["audit_log"]),
             "dry_run": dry_run,
         }
-        logger.info("Backfill plan computed", **stats)
+        logger.info("Backfill plan ready", **stats)
 
         if dry_run:
             return stats
 
-        # Step 5-6: Apply changes
+        # Apply changes
         self._apply_migration(db, migration_plan, batch_size)
+
+        # Remove cache after successful completion
+        if os.path.exists(cache_path):
+            os.remove(cache_path)
+
         stats["applied"] = True
         logger.info("Session backfill complete", **stats)
         return stats
 
-    # ------------------------------------------------------------------
-    # Step 1+2: Load records grouped by user identity, sorted by time
-    # ------------------------------------------------------------------
+    def resume(self, db: Session, batch_size: int = 500) -> Dict:
+        """Resume a previously interrupted backfill.
 
-    def _load_records(self, db: Session) -> Dict[str, List[dict]]:
-        """Load visits + events since BACKFILL_START, grouped by best user key.
-
-        Returns {user_key: [record, ...]} sorted ascending by timestamp.
-        Each record is a lightweight dict (not the ORM object) to keep
-        memory manageable on large tables.
+        Skips the plan phase entirely.  Processes any existing staging
+        tables (_backfill_remap_*), runs non-entry event sync, rebuilds
+        indexes, and cleans up.
         """
-        user_records: Dict[str, List[dict]] = defaultdict(list)
+        logger.info("Session backfill RESUME starting")
+        try:
+            db.execute(text("SET statement_timeout = 600000"))
+            db.execute(text("SET work_mem = '32MB'"))
+        except Exception:
+            pass
 
-        # -- Visits --
-        visits = (
-            db.query(
-                Visit.id,
-                Visit.session_id,
-                Visit.client_id,
-                Visit.ip_address,
-                Visit.user_agent,
-                Visit.timestamp,
-                Visit.page_url,
-                Visit.page_domain,
-                Visit.referrer,
-                Visit.source,
-                Visit.medium,
-                Visit.campaign,
-            )
-            .filter(Visit.timestamp >= BACKFILL_START)
-            .order_by(Visit.timestamp.asc())
-            .yield_per(2000)
+        # Ensure indexes are dropped (may already be from previous run)
+        logger.info("Ensuring session_id indexes are dropped")
+        db.execute(text("DROP INDEX IF EXISTS ix_visits_session_id"))
+        db.execute(text("DROP INDEX IF EXISTS ix_visit_events_session_id"))
+        db.commit()
+
+        # Process any existing staging tables (resumes from where it left off)
+        self._remap_via_temp_table(
+            db, "visits", "id", {}, batch_size=5000, label="visits"
+        )
+        self._remap_via_temp_table(
+            db, "visit_events", "id", {}, batch_size=5000, label="events"
         )
 
-        for row in visits:
-            rec = {
-                "type": "visit",
-                "id": row.id,
-                "old_session_id": row.session_id,
-                "client_id": row.client_id,
-                "ip_address": row.ip_address,
-                "user_agent": (row.user_agent or "")[:500],
-                "timestamp": row.timestamp,
-                "page_url": row.page_url,
-                "page_domain": row.page_domain,
-                "referrer": row.referrer,
-                "referrer_domain": self._extract_domain(row.referrer),
-                "source": row.source,
-                "medium": row.medium,
-                "campaign": row.campaign,
-            }
-            key = self._user_key(rec)
-            user_records[key].append(rec)
+        # Sync non-entry events
+        logger.info("Syncing non-entry event sessions via visit_id")
+        sync_start = BACKFILL_START
+        sync_now = datetime.now(tz=timezone.utc)
+        synced_total = 0
+        while sync_start < sync_now:
+            sync_end = min(sync_start + self._LOAD_WINDOW, sync_now)
+            result = db.execute(text(
+                "UPDATE visit_events e "
+                "SET session_id = v.session_id "
+                "FROM visits v "
+                "WHERE e.visit_id = v.id "
+                "AND e.visit_id IS NOT NULL "
+                "AND e.session_id IS DISTINCT FROM v.session_id "
+                "AND e.timestamp >= :start AND e.timestamp < :end"
+            ), {"start": sync_start, "end": sync_end})
+            synced_total += result.rowcount
+            db.commit()
+            sync_start = sync_end
+        logger.info("Non-entry events synced via visit_id", count=synced_total)
 
-        # Sort each user's visits by timestamp
-        for key in user_records:
-            user_records[key].sort(key=lambda r: r["timestamp"] or datetime.min.replace(tzinfo=timezone.utc))
+        # Rebuild indexes
+        logger.info("Rebuilding session_id indexes")
+        db.commit()
+        raw_conn = db.get_bind().raw_connection()
+        raw_conn.set_session(autocommit=True)
+        try:
+            cur = raw_conn.cursor()
+            cur.execute(
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_visits_session_id "
+                "ON visits (session_id)"
+            )
+            cur.execute(
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_visit_events_session_id "
+                "ON visit_events (session_id)"
+            )
+            cur.close()
+        finally:
+            raw_conn.set_session(autocommit=False)
+        logger.info("Session_id indexes rebuilt")
 
-        return dict(user_records)
+        # Cleanup orphaned sessions
+        logger.info("Cleaning up orphaned sessions")
+        result = db.execute(text(
+            "DELETE FROM visit_sessions vs "
+            "WHERE NOT EXISTS (SELECT 1 FROM visits v WHERE v.session_id = vs.id) "
+            "AND NOT EXISTS (SELECT 1 FROM visit_events e WHERE e.session_id = vs.id) "
+            "AND vs.first_visit >= :cutoff"
+        ), {"cutoff": BACKFILL_START})
+        db.commit()
+        logger.info("Orphaned sessions deleted", count=result.rowcount)
+
+        logger.info("Session backfill resume complete")
+        return {"resumed": True, "events_synced": synced_total}
 
     # ------------------------------------------------------------------
-    # Step 3+4: Compute new session assignments
+    # Streaming load + compute (fused pipeline)
     # ------------------------------------------------------------------
 
-    def _compute_migration_plan(self, user_records: Dict[str, List[dict]]) -> Dict:
-        """Walk each user's timeline and assign journey-based session IDs.
+    # How wide each time-range page is when loading records.  Keeps
+    # individual queries small so the remote Postgres doesn't OOM.
+    _LOAD_WINDOW = timedelta(days=1)
 
-        Returns a plan dict containing:
-          - visit_updates: {visit_id: new_session_id}
-          - event_updates: {event_id: new_session_id}
-          - new_sessions: {session_id: session_attrs}
-          - audit_log: [(old_session_id, new_session_id, client_id, ...)]
-          - aggregate stats
+    def _stream_build_plan(self, db: Session) -> Dict:
+        """Load records in weekly windows and compute the migration plan.
+
+        Only one window's worth of records lives in memory at a time.
+        Per-user session state carries forward across windows, and the
+        output maps (visit_updates, event_updates, new_sessions) accumulate
+        incrementally — they are much smaller per-entry than full records.
         """
+        # Per-user carry-forward state (journey_seq, current session id/meta)
+        user_state: Dict[str, dict] = {}
+
+        # Output accumulators
         visit_updates: Dict[int, str] = {}
         event_updates: Dict[int, str] = {}
         new_sessions: Dict[str, dict] = {}
-        audit_log: List[dict] = []
-
+        audit_pairs: Dict[Tuple[str, str], dict] = {}
         old_session_ids: set = set()
         new_session_ids: set = set()
 
-        for user_key, records in user_records.items():
-            journey_seq = 0
-            current_session_id: Optional[str] = None
-            current_session_meta: Optional[dict] = None
+        now = datetime.now(tz=timezone.utc)
+        window_start = BACKFILL_START
+        window_num = 0
 
-            for rec in records:
-                old_session_ids.add(rec["old_session_id"])
+        while window_start < now:
+            window_end = min(window_start + self._LOAD_WINDOW, now)
+            window_num += 1
+            logger.info(
+                "Processing window",
+                window=window_num,
+                start=window_start.isoformat(),
+                end=window_end.isoformat(),
+            )
 
-                is_new_journey = self._should_start_new_journey(rec, current_session_meta)
+            # Load this window's records, with reconnect on failure
+            window_records = None
+            for attempt in range(3):
+                try:
+                    window_records = self._load_window(db, window_start, window_end)
+                    break
+                except Exception as e:
+                    logger.warning("Window load failed, reconnecting",
+                                   window=window_num, attempt=attempt + 1, error=str(e)[:100])
+                    try:
+                        db.close()
+                    except Exception:
+                        pass
+                    import time
+                    time.sleep(5 * (attempt + 1))
+                    db = SessionLocal()
+                    try:
+                        db.execute(text("SET statement_timeout = 600000"))
+                        db.execute(text("SET work_mem = '32MB'"))
+                    except Exception:
+                        pass
+            if window_records is None:
+                raise RuntimeError(f"Failed to load window {window_num} after 3 attempts")
 
-                if is_new_journey or current_session_id is None:
-                    # Start a new journey
-                    current_session_id = self._make_session_id(user_key, journey_seq)
-                    current_session_meta = {
-                        "session_id": current_session_id,
-                        "user_key": user_key,
-                        "client_id": rec.get("client_id"),
-                        "ip_address": rec.get("ip_address"),
-                        "user_agent": rec.get("user_agent"),
-                        "first_visit": rec["timestamp"],
-                        "last_visit": rec["timestamp"],
-                        "entry_referrer": rec.get("referrer"),
-                        "entry_referrer_domain": rec.get("referrer_domain"),
-                        "is_external_entry": is_new_journey,
-                        "visit_count": 0,
+            # Process each user's records for this window
+            for user_key, records in window_records.items():
+                records.sort(
+                    key=lambda r: r["timestamp"] or datetime.min.replace(tzinfo=timezone.utc)
+                )
+
+                state = user_state.get(user_key)
+                if state is None:
+                    state = {
+                        "journey_seq": 0,
+                        "current_session_id": None,
+                        "current_session_meta": None,
                     }
-                    new_sessions[current_session_id] = current_session_meta
-                    journey_seq += 1
+                    user_state[user_key] = state
 
-                # Update running session metadata — carry forward any
-                # fields that were missing when the journey started
-                # (e.g. first record was an event without ip/ua).
-                current_session_meta["last_visit"] = rec["timestamp"]
-                for field in ("client_id", "ip_address", "user_agent"):
-                    if rec.get(field) and not current_session_meta.get(field):
-                        current_session_meta[field] = rec[field]
+                journey_seq = state["journey_seq"]
+                current_session_id = state["current_session_id"]
+                current_session_meta = state["current_session_meta"]
 
-                new_session_ids.add(current_session_id)
+                for rec in records:
+                    old_session_ids.add(rec["old_session_id"])
 
-                # Only record an update if the session_id actually changes
-                if rec["old_session_id"] != current_session_id:
-                    visit_updates[rec["id"]] = current_session_id
-                current_session_meta["visit_count"] += 1
+                    is_new_journey = self._should_start_new_journey(
+                        rec, current_session_meta
+                    )
 
-        # Build audit log: one entry per old→new session_id mapping
-        old_new_pairs: Dict[Tuple[str, str], dict] = defaultdict(lambda: {"visits": 0, "client_id": None})
-        for user_key, records in user_records.items():
-            journey_seq = 0
-            current_session_id = None
-            current_session_meta = None
+                    if is_new_journey or current_session_id is None:
+                        current_session_id = self._make_session_id(
+                            user_key, journey_seq
+                        )
+                        current_session_meta = {
+                            "session_id": current_session_id,
+                            "user_key": user_key,
+                            "client_id": rec.get("client_id"),
+                            "ip_address": rec.get("ip_address"),
+                            "user_agent": rec.get("user_agent"),
+                            "first_visit": rec["timestamp"],
+                            "last_visit": rec["timestamp"],
+                            "entry_referrer": rec.get("referrer"),
+                            "entry_referrer_domain": rec.get("referrer_domain"),
+                            "is_external_entry": is_new_journey,
+                            "visit_count": 0,
+                        }
+                        new_sessions[current_session_id] = current_session_meta
+                        journey_seq += 1
 
-            for rec in records:
-                is_new = self._should_start_new_journey(rec, current_session_meta)
-                if is_new or current_session_id is None:
-                    current_session_id = self._make_session_id(user_key, journey_seq)
-                    current_session_meta = {
-                        "entry_referrer_domain": rec.get("referrer_domain"),
-                        "last_visit": rec["timestamp"],
-                    }
-                    journey_seq += 1
-                else:
+                    # Carry forward fields that were missing at journey start
                     current_session_meta["last_visit"] = rec["timestamp"]
+                    for field in ("client_id", "ip_address", "user_agent"):
+                        if rec.get(field) and not current_session_meta.get(field):
+                            current_session_meta[field] = rec[field]
 
-                old_sid = rec["old_session_id"]
-                if old_sid != current_session_id:
-                    pair = old_new_pairs[(old_sid, current_session_id)]
-                    pair["client_id"] = rec.get("client_id")
-                    pair["visits"] += 1
+                    new_session_ids.add(current_session_id)
+
+                    if rec["old_session_id"] != current_session_id:
+                        if rec["type"] == "visit":
+                            visit_updates[rec["id"]] = current_session_id
+                        else:
+                            event_updates[rec["id"]] = current_session_id
+
+                        pair_key = (rec["old_session_id"], current_session_id)
+                        if pair_key not in audit_pairs:
+                            audit_pairs[pair_key] = {
+                                "client_id": None,
+                                "visits": 0,
+                                "events": 0,
+                            }
+                        pair = audit_pairs[pair_key]
+                        pair["client_id"] = rec.get("client_id")
+                        if rec["type"] == "visit":
+                            pair["visits"] += 1
+                        else:
+                            pair["events"] += 1
+
+                    current_session_meta["visit_count"] += 1
+
+                # Save state back for next window
+                state["journey_seq"] = journey_seq
+                state["current_session_id"] = current_session_id
+                state["current_session_meta"] = current_session_meta
+
+            # window_records is discarded here — GC reclaims the memory
+            # before the next window is loaded.
+            window_start = window_end
+
+        logger.info(
+            "Stream processing complete", users=len(user_state), windows=window_num
+        )
 
         audit_log = [
             {
@@ -245,31 +348,141 @@ class SessionBackfillService:
                 "new_session_id": new_sid,
                 "client_id": info["client_id"],
                 "visit_count_moved": info["visits"],
-                "event_count_moved": 0,
+                "event_count_moved": info["events"],
             }
-            for (old_sid, new_sid), info in old_new_pairs.items()
+            for (old_sid, new_sid), info in audit_pairs.items()
         ]
 
         return {
             "visit_updates": visit_updates,
+            "event_updates": event_updates,
             "new_sessions": new_sessions,
             "audit_log": audit_log,
             "sessions_before": len(old_session_ids),
             "sessions_after": len(new_session_ids),
             "visits_remapped": len(visit_updates),
+            "events_remapped": len(event_updates),
+            "users_processed": len(user_state),
         }
+
+    _PAGE_SIZE = 2000
+
+    def _load_window(
+        self, db: Session, window_start: datetime, window_end: datetime
+    ) -> Dict[str, List[dict]]:
+        """Load one time window of visits + events, grouped by user key.
+
+        Uses raw SQL with keyset pagination (id > last_id LIMIT N) so each
+        query is small and fully closed before the next one starts — no
+        lingering cursors or DB-side state accumulation.
+        """
+        user_records: Dict[str, List[dict]] = defaultdict(list)
+
+        # -- Visits (keyset pagination by id) --
+        visit_count = 0
+        last_id = 0
+        while True:
+            rows = db.execute(text(
+                "SELECT id, session_id, client_id, ip_address, user_agent, "
+                "timestamp, page_url, page_domain, referrer, source, medium, campaign "
+                "FROM visits "
+                "WHERE timestamp >= :start AND timestamp < :end AND id > :last_id "
+                "ORDER BY id LIMIT :lim"
+            ), {"start": window_start, "end": window_end, "last_id": last_id,
+                "lim": self._PAGE_SIZE}).fetchall()
+            if not rows:
+                break
+            for r in rows:
+                rec = {
+                    "type": "visit",
+                    "id": r[0],
+                    "old_session_id": r[1],
+                    "client_id": r[2],
+                    "ip_address": r[3],
+                    "user_agent": (r[4] or "")[:500],
+                    "timestamp": r[5],
+                    "page_url": r[6],
+                    "page_domain": r[7],
+                    "referrer": r[8],
+                    "referrer_domain": self._extract_domain(r[8]),
+                    "source": r[9],
+                    "medium": r[10],
+                    "campaign": r[11],
+                }
+                user_records[self._user_key(rec)].append(rec)
+            visit_count += len(rows)
+            last_id = rows[-1][0]
+
+        # -- Entry-type events only (keyset pagination by id) --
+        # Non-entry events (clicks, scrolls, heartbeats) can never affect
+        # session boundaries — they're bulk-synced via visit_id FK in
+        # _apply_migration instead.
+        event_count = 0
+        last_id = 0
+        while True:
+            rows = db.execute(text(
+                "SELECT id, session_id, client_id, timestamp, event_type, "
+                "page_url, page_domain, referrer, referrer_domain, source, medium, campaign "
+                "FROM visit_events "
+                "WHERE timestamp >= :start AND timestamp < :end AND id > :last_id "
+                "AND client_id IS NOT NULL AND client_id != '' "
+                "AND event_type IN :entry_types "
+                "ORDER BY id LIMIT :lim"
+            ), {"start": window_start, "end": window_end, "last_id": last_id,
+                "lim": self._PAGE_SIZE,
+                "entry_types": tuple(self._ENTRY_EVENT_TYPES)}).fetchall()
+            if not rows:
+                break
+            for r in rows:
+                rec = {
+                    "type": "event",
+                    "id": r[0],
+                    "old_session_id": r[1],
+                    "client_id": r[2],
+                    "ip_address": None,
+                    "user_agent": None,
+                    "timestamp": r[3],
+                    "event_type": r[4],
+                    "page_url": r[5],
+                    "page_domain": r[6],
+                    "referrer": r[7],
+                    "referrer_domain": r[8],
+                    "source": r[9],
+                    "medium": r[10],
+                    "campaign": r[11],
+                }
+                user_records[self._user_key(rec)].append(rec)
+            event_count += len(rows)
+            last_id = rows[-1][0]
+
+        logger.info("Window loaded", visits=visit_count, events=event_count)
+        return dict(user_records)
+
+    # ------------------------------------------------------------------
+    # Session boundary detection
+    # ------------------------------------------------------------------
 
     # Event types that can represent a new page entry.
     # Everything else (click, scroll, form_input, heartbeat, visibility, etc.)
     # is always a continuation of an existing page — never a session boundary.
     _ENTRY_EVENT_TYPES = {"page_view", "navigation", "navigate"}
 
+    # If there's no referrer signal at all and the gap since the last
+    # activity exceeds this threshold, treat it as a new journey.
+    _INACTIVITY_TIMEOUT = timedelta(minutes=30)
+
     def _should_start_new_journey(self, rec: dict, current_meta: Optional[dict]) -> bool:
         """Decide whether this historical record starts a new journey.
 
-        Conservative for backfill: only entry-type events (page_view,
-        navigation) with clear external signals start a new session.
-        All other event types are always continuations.
+        Rules (in order):
+        1. First record for a user → new journey.
+        2. Non-entry events (clicks, scrolls, heartbeats) → always continue.
+        3. External referrer → new journey.
+        4. Internal referrer → continue (regardless of time gap).
+        5. External source/medium/campaign → new journey.
+        6. Internal source → continue.
+        7. Zero signal + >30 min inactivity → new journey.
+        8. Zero signal + <=30 min gap → continue.
         """
         if current_meta is None:
             return True  # very first record for this user
@@ -293,7 +506,7 @@ class SessionBackfillService:
         # Referrer domain is the strongest signal
         if referrer_domain:
             if is_internal_domain(referrer_domain):
-                return False
+                return False  # internal referrer → continue regardless of gap
             return True  # external referrer → new journey
 
         # No referrer — check source/medium/campaign fallbacks
@@ -306,20 +519,26 @@ class SessionBackfillService:
         if medium or campaign:
             return True
 
-        # Zero signal on a page entry — for backfill, default to CONTINUE.
-        # Historical data has many page_views with no referrer (direct visits,
-        # new tabs, bookmarks). Splitting on every one of these would create
-        # more fragmentation, not less. The backfill errs on the side of
-        # continuity; the live tracker can be stricter.
+        # Zero signal — use inactivity timeout as fallback.
+        # No referrer + gap > 30 min = likely a new visit (bookmark,
+        # typed URL, reopened tab). Short gaps are continuations.
+        last_visit = current_meta.get("last_visit")
+        rec_ts = rec.get("timestamp")
+        if last_visit and rec_ts:
+            gap = rec_ts - last_visit
+            if gap > self._INACTIVITY_TIMEOUT:
+                return True
+
         return False
 
     # ------------------------------------------------------------------
-    # Step 5+6: Apply the migration
+    # Apply the migration
     # ------------------------------------------------------------------
 
     def _apply_migration(self, db: Session, plan: Dict, batch_size: int) -> None:
         """Write new session rows, remap visit/event session_ids, log audit."""
         visit_updates = plan["visit_updates"]
+        event_updates = plan["event_updates"]
         new_sessions = plan["new_sessions"]
         audit_log = plan["audit_log"]
 
@@ -380,6 +599,7 @@ class SessionBackfillService:
             )
             try:
                 db.execute(text(sql), params)
+                db.commit()
                 created += len(chunk)
             except Exception as e:
                 db.rollback()
@@ -387,7 +607,7 @@ class SessionBackfillService:
                 if skipped <= 2500:
                     logger.warning("Batch insert failed", error=str(e)[:200])
 
-            if (i // batch_size) % 10 == 0:
+            if (i // batch_size) % 20 == 0:
                 logger.info("Sessions insert progress", done=min(i + batch_size, len(to_insert)), total=len(to_insert))
 
         db.commit()

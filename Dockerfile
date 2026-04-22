@@ -31,6 +31,9 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copy backend application code
 COPY app/ ./app/
 
+# Copy test pages (cross-domain session test served by the app)
+COPY tests/ ./tests/
+
 # Copy migration downgrade script
 COPY downgrade_migration.py ./
 
