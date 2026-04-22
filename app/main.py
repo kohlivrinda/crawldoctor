@@ -14,10 +14,7 @@ from app.database import init_db, close_db
 from app.api import tracking_router, analytics_router, auth_router, admin_router
 from app.services.auth import AuthService
 from app.services.event_batcher import event_batcher
-from app.scheduler import SchedulerService
-
-# Initialize scheduler
-scheduler_service = SchedulerService()
+from app.background import job_runner, job_scheduler
 
 
 # Configure structured logging
@@ -55,9 +52,10 @@ async def lifespan(app: FastAPI):
 
         # Start event batcher
         await event_batcher.start()
-        
-        # Start scheduler
-        scheduler_service.start()
+
+        # Start background job runner and scheduler
+        await job_runner.start()
+        await job_scheduler.start()
         
         # Create default admin user
         from app.database import SessionLocal
@@ -83,14 +81,19 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down CrawlDoctor application")
     
     try:
+        await job_scheduler.stop()
+    except Exception as e:
+        logger.error("Error stopping job scheduler", error=str(e))
+
+    try:
+        await job_runner.stop()
+    except Exception as e:
+        logger.error("Error stopping job runner", error=str(e))
+
+    try:
         await event_batcher.stop()
     except Exception as e:
         logger.error("Error stopping event batcher", error=str(e))
-
-    try:
-        scheduler_service.shutdown()
-    except Exception as e:
-        logger.error("Error shutting down scheduler", error=str(e))
 
     try:
         await close_db()

@@ -87,9 +87,8 @@ class Settings(BaseSettings):
     analytics_export_batch_size: int = Field(default=2000, description="Export batch size for CSV generation")
     analytics_retention_days: int = Field(default=365, description="Data retention in days")
     analytics_export_timeout: int = Field(default=600, description="Export timeout in seconds")
-    summary_realtime_updates: bool = Field(default=False, description="Update summary tables on each event")
-    summary_backfill_interval_minutes: int = Field(default=30, description="Summary backfill interval (minutes)")
-    summary_backfill_days: int = Field(default=30, description="Summary backfill lookback window (days)")
+    summary_backfill_interval_minutes: int = Field(default=5, description="Background sweep interval (minutes)")
+    summary_backfill_days: int = Field(default=30, description="Watermark fallback lookback window (days)")
     
     # Monitoring
     enable_metrics: bool = Field(default=True, description="Enable Prometheus metrics")

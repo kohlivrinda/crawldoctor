@@ -609,71 +609,62 @@ class SessionBackfillService:
 
             if (i // batch_size) % 20 == 0:
                 logger.info("Sessions insert progress", done=min(i + batch_size, len(to_insert)), total=len(to_insert))
+
+        db.commit()
         logger.info("Session rows created", created=created, skipped=skipped)
 
-        # Drop session_id indexes before bulk remapping — index maintenance
-        # is the bottleneck on a memory-constrained DB.  Rebuilt after all
-        # remapping (including the non-entry event sync) is done.
-        logger.info("Dropping session_id indexes for bulk remap")
-        db.execute(text("DROP INDEX IF EXISTS ix_visits_session_id"))
-        db.execute(text("DROP INDEX IF EXISTS ix_visit_events_session_id"))
-        db.commit()
-
-        # 5a. Remap visits via temp table.
-        self._remap_via_temp_table(
-            db, "visits", "id", visit_updates, batch_size=10000, label="visits"
-        )
-
-        # 5b. Remap events — same temp table approach.
-        self._remap_via_temp_table(
-            db, "visit_events", "id", event_updates, batch_size=10000, label="events"
-        )
-
-        # 5c. Bulk-sync non-entry events (clicks, scrolls, heartbeats, etc.)
-        # to their parent visit's session via the visit_id FK.
-        # These weren't loaded into the timeline (they can't affect session
-        # boundaries) but still need their session_id updated.
-        # Batched by week to avoid blowing DB memory.
-        logger.info("Syncing non-entry event sessions via visit_id")
-        sync_start = BACKFILL_START
-        sync_now = datetime.now(tz=timezone.utc)
-        synced_total = 0
-        while sync_start < sync_now:
-            sync_end = min(sync_start + self._LOAD_WINDOW, sync_now)
-            result = db.execute(text(
-                "UPDATE visit_events e "
-                "SET session_id = v.session_id "
-                "FROM visits v "
-                "WHERE e.visit_id = v.id "
-                "AND e.visit_id IS NOT NULL "
-                "AND e.session_id IS DISTINCT FROM v.session_id "
-                "AND e.timestamp >= :start AND e.timestamp < :end"
-            ), {"start": sync_start, "end": sync_end})
-            synced_total += result.rowcount
-            db.commit()
-            sync_start = sync_end
-        logger.info("Non-entry events synced via visit_id", count=synced_total)
-
-        # Rebuild session_id indexes — requires autocommit (no transaction
-        # block) so we use the raw DBAPI connection.
-        logger.info("Rebuilding session_id indexes")
-        db.commit()
-        raw_conn = db.get_bind().raw_connection()
-        raw_conn.set_session(autocommit=True)
-        try:
-            cur = raw_conn.cursor()
-            cur.execute(
-                "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_visits_session_id "
-                "ON visits (session_id)"
+        # 5a. Remap visits in bulk batches
+        logger.info("Remapping visits", count=len(visit_updates))
+        visit_items = list(visit_updates.items())
+        for i in range(0, len(visit_items), batch_size):
+            chunk = visit_items[i:i+batch_size]
+            # Use a temp table approach via CTE for clean parameterization
+            params = {}
+            case_parts = []
+            id_params = []
+            for j, (vid, new_sid) in enumerate(chunk):
+                params[f"v{j}"] = vid
+                params[f"s{j}"] = new_sid
+                case_parts.append(f"WHEN id = :v{j} THEN :s{j}")
+                id_params.append(f":v{j}")
+            sql = (
+                f"UPDATE visits SET session_id = CASE {' '.join(case_parts)} END "
+                f"WHERE id IN ({','.join(id_params)})"
             )
-            cur.execute(
-                "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_visit_events_session_id "
-                "ON visit_events (session_id)"
+            db.execute(text(sql), params)
+            if (i // batch_size) % 10 == 0:
+                db.commit()
+                logger.info("Visits remapped progress", done=min(i + batch_size, len(visit_items)), total=len(visit_items))
+        db.commit()
+        logger.info("Visits remapped done")
+
+        # 5b. Remap events — bulk update by old→new session_id
+        old_to_new_session: Dict[str, str] = {}
+        for entry in audit_log:
+            old_to_new_session[entry["old_session_id"]] = entry["new_session_id"]
+
+        logger.info("Remapping events by session_id", mappings=len(old_to_new_session))
+        mapping_items = list(old_to_new_session.items())
+        for i in range(0, len(mapping_items), batch_size):
+            chunk = mapping_items[i:i+batch_size]
+            params = {}
+            case_parts = []
+            id_params = []
+            for j, (old_sid, new_sid) in enumerate(chunk):
+                params[f"o{j}"] = old_sid
+                params[f"n{j}"] = new_sid
+                case_parts.append(f"WHEN session_id = :o{j} THEN :n{j}")
+                id_params.append(f":o{j}")
+            sql = (
+                f"UPDATE visit_events SET session_id = CASE {' '.join(case_parts)} END "
+                f"WHERE session_id IN ({','.join(id_params)})"
             )
-            cur.close()
-        finally:
-            raw_conn.set_session(autocommit=False)
-        logger.info("Session_id indexes rebuilt")
+            db.execute(text(sql), params)
+            if (i // batch_size) % 10 == 0:
+                db.commit()
+                logger.info("Events remapped progress", done=min(i + batch_size, len(mapping_items)), total=len(mapping_items))
+        db.commit()
+        logger.info("Events remapped done")
 
         # 6b. Write audit log
         logger.info("Writing audit log", rows=len(audit_log))
@@ -694,20 +685,20 @@ class SessionBackfillService:
                 f"VALUES {','.join(values_parts)}"
             )
             db.execute(text(sql), params)
-            db.commit()
-            if (i // batch_size) % 20 == 0:
-                logger.info("Audit log progress", done=min(i + batch_size, len(audit_log)), total=len(audit_log))
+            if (i // batch_size) % 10 == 0:
+                db.commit()
+        db.commit()
         logger.info("Audit log done")
 
-        # 7. Delete orphaned old session rows that were fully remapped.
-        # Scoped to only sessions touched by this backfill — no full-table scan.
-        old_sids_to_delete = list({
+        # 7. Delete orphaned session rows — both remapped old sessions and
+        #    any sessions with no visits/events (e.g. from dedup race conditions)
+        old_sids_to_delete = [
             entry["old_session_id"]
             for entry in audit_log
             if entry["old_session_id"] != entry["new_session_id"]
-        })
+        ]
         logger.info("Cleaning up remapped session rows", count=len(old_sids_to_delete))
-        deleted = 0
+        deleted_remapped = 0
         for i in range(0, len(old_sids_to_delete), batch_size):
             chunk = old_sids_to_delete[i:i+batch_size]
             params = {f"s{j}": sid for j, sid in enumerate(chunk)}
@@ -718,163 +709,23 @@ class SessionBackfillService:
                 f"AND NOT EXISTS (SELECT 1 FROM visit_events WHERE session_id = visit_sessions.id)"
             )
             result = db.execute(text(sql), params)
-            deleted += result.rowcount
-            db.commit()
-        logger.info("Remapped session rows deleted", deleted=deleted,
-                     skipped=len(old_sids_to_delete) - deleted)
-
-    # ------------------------------------------------------------------
-    # Bulk remap helper
-    # ------------------------------------------------------------------
-
-    def _remap_via_temp_table(
-        self, db: Session, table: str, id_col: str,
-        updates: Dict[int, str], batch_size: int = 5000, label: str = "",
-    ) -> None:
-        """Bulk-remap session_id on *table* using a staging table.
-
-        Uses a real (non-temp) UNLOGGED table so it survives connection
-        drops if the DB OOMs mid-way.  Rows are deleted from the staging
-        table as they are applied, so re-running after a crash resumes
-        from where it left off.
-        """
-        staging = f"_backfill_remap_{table}"
-
-        # Check if a previous run left a populated staging table
-        existing_remaining = 0
-        try:
-            existing_remaining = db.execute(text(
-                f"SELECT COUNT(*) FROM {staging}"
-            )).scalar() or 0
-        except Exception:
-            db.rollback()
-
-        if not updates and existing_remaining == 0:
-            logger.info("No remapping needed", target=label)
-            return
-
-        if existing_remaining > 0:
-            logger.info("Resuming from existing staging table",
-                        target=label, remaining=remaining)
-        else:
-            # Create (or recreate) the staging table
-            logger.info("Remapping via staging table", target=label, count=len(updates))
-            db.execute(text(f"DROP TABLE IF EXISTS {staging}"))
-            db.execute(text(
-                f"CREATE UNLOGGED TABLE {staging} ("
-                f"  rid BIGINT PRIMARY KEY, new_sid VARCHAR(64))"
-            ))
-            db.commit()
-
-            # Bulk-insert mappings
-            items = list(updates.items())
-            for i in range(0, len(items), 5000):
-                chunk = items[i:i+5000]
-                params = {}
-                values_parts = []
-                for j, (rid, new_sid) in enumerate(chunk):
-                    params[f"r{j}"] = rid
-                    params[f"s{j}"] = new_sid
-                    values_parts.append(f"(:r{j}, :s{j})")
-                db.execute(
-                    text(f"INSERT INTO {staging} (rid, new_sid) VALUES {','.join(values_parts)}"),
-                    params,
-                )
-            db.commit()
-            remaining = len(items)
-            logger.info("Staging table populated", target=label, rows=remaining)
-
-        # UPDATE + DELETE in chunks — each cycle is committed, so a crash
-        # loses at most one batch.
-        total = remaining
-        done = 0
-        while True:
-            # Use a CTE to select and delete in one round-trip
-            result = db.execute(text(
-                f"WITH batch AS ("
-                f"  SELECT rid, new_sid FROM {staging} LIMIT :lim"
-                f") "
-                f"UPDATE {table} t SET session_id = batch.new_sid "
-                f"FROM batch WHERE t.{id_col} = batch.rid"
-            ), {"lim": batch_size})
-            updated = result.rowcount
-            if updated == 0:
-                break
-            db.execute(text(
-                f"DELETE FROM {staging} WHERE rid IN ("
-                f"  SELECT rid FROM {staging} LIMIT :lim)"
-            ), {"lim": batch_size})
-            db.commit()
-            done += updated
-            if done == updated or done % (batch_size * 10) == 0:
-                logger.info(f"{label} remapped progress", done=done, total=total)
-
-        # Cleanup
-        db.execute(text(f"DROP TABLE IF EXISTS {staging}"))
+            deleted_remapped += result.rowcount
+            if (i // batch_size) % 10 == 0:
+                db.commit()
         db.commit()
-        logger.info(f"{label} remapped done", total=done)
+        logger.info("Remapped session rows deleted", deleted=deleted_remapped,
+                     skipped=len(old_sids_to_delete) - deleted_remapped)
 
-    # ------------------------------------------------------------------
-    # Plan cache (avoids recomputing after crashes)
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _save_plan_cache(path: str, plan: Dict) -> None:
-        """Serialize the migration plan to a JSON file."""
-        serializable = {
-            "visit_updates": {str(k): v for k, v in plan["visit_updates"].items()},
-            "event_updates": {str(k): v for k, v in plan["event_updates"].items()},
-            "new_sessions": {
-                sid: {
-                    k: (v.isoformat() if isinstance(v, datetime) else v)
-                    for k, v in meta.items()
-                }
-                for sid, meta in plan["new_sessions"].items()
-            },
-            "audit_log": plan["audit_log"],
-            "sessions_before": plan["sessions_before"],
-            "sessions_after": plan["sessions_after"],
-            "visits_remapped": plan["visits_remapped"],
-            "events_remapped": plan["events_remapped"],
-            "users_processed": plan["users_processed"],
-        }
-        with open(path, "w") as f:
-            json.dump(serializable, f)
-
-    @staticmethod
-    def _load_plan_cache(path: str) -> Optional[Dict]:
-        """Load a cached plan from disk, or return None."""
-        if not os.path.exists(path):
-            return None
-        try:
-            with open(path) as f:
-                raw = json.load(f)
-            plan = {
-                "visit_updates": {int(k): v for k, v in raw["visit_updates"].items()},
-                "event_updates": {int(k): v for k, v in raw["event_updates"].items()},
-                "new_sessions": {},
-                "audit_log": raw["audit_log"],
-                "sessions_before": raw["sessions_before"],
-                "sessions_after": raw["sessions_after"],
-                "visits_remapped": raw["visits_remapped"],
-                "events_remapped": raw["events_remapped"],
-                "users_processed": raw["users_processed"],
-            }
-            # Restore datetime fields in new_sessions
-            dt_fields = {"first_visit", "last_visit"}
-            for sid, meta in raw["new_sessions"].items():
-                restored = {}
-                for k, v in meta.items():
-                    if k in dt_fields and v and isinstance(v, str):
-                        restored[k] = datetime.fromisoformat(v)
-                    else:
-                        restored[k] = v
-                plan["new_sessions"][sid] = restored
-            logger.info("Plan cache loaded", path=path)
-            return plan
-        except Exception as e:
-            logger.warning("Failed to load plan cache, will recompute", error=str(e)[:200])
-            return None
+        # 7b. Clean up any other orphaned sessions (visit_count=0, no references)
+        result = db.execute(text(
+            "DELETE FROM visit_sessions "
+            "WHERE visit_count = 0 "
+            "AND NOT EXISTS (SELECT 1 FROM visits WHERE session_id = visit_sessions.id) "
+            "AND NOT EXISTS (SELECT 1 FROM visit_events WHERE session_id = visit_sessions.id)"
+        ))
+        deleted_orphans = result.rowcount
+        db.commit()
+        logger.info("Orphaned session rows deleted", deleted=deleted_orphans)
 
     # ------------------------------------------------------------------
     # Helpers

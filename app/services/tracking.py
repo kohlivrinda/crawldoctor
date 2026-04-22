@@ -10,10 +10,10 @@ from sqlalchemy import func
 import structlog
 
 from app.models.visit import Visit, VisitSession, VisitEvent
-from app.models.summary import LeadSummary, JourneySummary, JourneyFormFill
 from app.services.crawler_detection import CrawlerDetectionService, CrawlerDetectionResult
 from app.services.analytics import is_real_form_submit
 from app.services.event_batcher import event_batcher
+from app.background.runner import job_runner
 from app.services.geo import GeoLocationService
 from app.utils.domains import is_internal_domain, classify_domain
 from app.config import settings
@@ -1111,23 +1111,34 @@ class TrackingService:
 
         event_id = None
         queued = False
+        is_real_form = client_id and event_type == "form_submit" and is_real_form_submit(enriched_data)
 
-        if event_batcher.enabled:
-            queued = await event_batcher.enqueue(event_payload)
-
-        if not queued:
+        if is_real_form:
+            # Form submits bypass batcher — write directly so the background
+            # job handler can always find the event in the DB.
             event = VisitEvent(**event_payload)
             db.add(event)
             db.commit()
             db.refresh(event)
             event_id = event.id
-
-            # Pre-compute journey only for real form submits (not on every request)
-            if client_id and event_type == "form_submit" and is_real_form_submit(enriched_data) and settings.summary_realtime_updates:
-                try:
-                    self._upsert_journey_on_form_submit(db, client_id, event, enriched_data)
-                except Exception as e:
-                    logger.error("Failed to upsert journey on form submit", client_id=client_id, error=str(e))
+            try:
+                await job_runner.enqueue("recompute_journey", {"client_id": client_id}, dedup_key=client_id)
+            except Exception as e:
+                logger.error("Failed to enqueue recompute_journey", client_id=client_id, error=str(e))
+        elif event_batcher.enabled:
+            queued = await event_batcher.enqueue(event_payload)
+            if not queued:
+                event = VisitEvent(**event_payload)
+                db.add(event)
+                db.commit()
+                db.refresh(event)
+                event_id = event.id
+        else:
+            event = VisitEvent(**event_payload)
+            db.add(event)
+            db.commit()
+            db.refresh(event)
+            event_id = event.id
 
         # If we created or linked a visit, opportunistically backfill visit geo, tracking fields, and client-side data from event
         if linked_visit:
@@ -1224,92 +1235,3 @@ class TrackingService:
             "unique_paths": len(set(v.path for v in visits if v.path))
         }
 
-    def _upsert_journey_on_form_submit(
-        self, db: Session, client_id: str, event: VisitEvent, event_data: Dict[str, Any]
-    ) -> None:
-        """On real form submit: insert JourneyFormFill and upsert JourneySummary. Not computed on every request."""
-        form_vals = event_data.get("form_values") or event_data.get("values") or {}
-        filled = event_data.get("filled_fields")
-        if filled is None and isinstance(form_vals, dict):
-            filled = len(form_vals)
-
-        jff = JourneyFormFill(
-            client_id=client_id,
-            visit_event_id=event.id,
-            timestamp=event.timestamp,
-            page_url=event.page_url,
-            path=event.path,
-            form_values=form_vals if isinstance(form_vals, dict) else None,
-            filled_fields=filled,
-            form_id=event_data.get("id"),
-            form_action=event_data.get("action"),
-        )
-        db.add(jff)
-
-        journey = db.query(JourneySummary).filter(JourneySummary.client_id == client_id).first()
-        if not journey:
-            visits = (
-                db.query(Visit)
-                .filter(Visit.client_id == client_id)
-                .order_by(Visit.timestamp.asc())
-                .all()
-            )
-            first_visit = visits[0] if visits else None
-            last_visit = visits[-1] if visits else None
-            path_list = []
-            last_path = None
-            for v in visits:
-                p = (v.path or "").strip()
-                if p != last_path:
-                    path_list.append(p or "(page)")
-                    last_path = p
-            path_sequence = " → ".join(path_list) if path_list else None
-            first_seen = first_visit.timestamp if first_visit else event.timestamp
-            last_seen = last_visit.timestamp if last_visit else event.timestamp
-            if event.timestamp > last_seen:
-                last_seen = event.timestamp
-            email, name = self._extract_profile_from_form_values(form_vals)
-            journey = JourneySummary(
-                client_id=client_id,
-                first_seen=first_seen,
-                last_seen=last_seen,
-                visit_count=len(visits),
-                entry_page=first_visit.page_url if first_visit else event.page_url,
-                exit_page=last_visit.page_url if last_visit else event.page_url,
-                path_sequence=path_sequence,
-                email=email,
-                name=name,
-                has_captured_data=1,
-                form_fill_count=1,
-                source=first_visit.source if first_visit else None,
-                medium=first_visit.medium if first_visit else None,
-                campaign=first_visit.campaign if first_visit else None,
-            )
-            db.add(journey)
-        else:
-            journey.form_fill_count = (journey.form_fill_count or 0) + 1
-            if event.timestamp and (not journey.last_seen or event.timestamp > journey.last_seen):
-                journey.last_seen = event.timestamp
-            if not journey.email and not journey.name:
-                email, name = self._extract_profile_from_form_values(form_vals)
-                if email:
-                    journey.email = email
-                if name:
-                    journey.name = name
-            db.add(journey)
-
-        db.commit()
-
-    def _extract_profile_from_form_values(self, form_vals: Optional[Dict]) -> tuple:
-        if not form_vals or not isinstance(form_vals, dict):
-            return None, None
-        email = name = None
-        for k, v in form_vals.items():
-            if v is None or str(v).strip() == "":
-                continue
-            kl = str(k).lower()
-            if not email and ("email" in kl or "mail" in kl) and "@" in str(v):
-                email = str(v).strip()
-            if not name and ("name" in kl or "user" in kl or "full" in kl):
-                name = str(v).strip()
-        return email, name

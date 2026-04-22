@@ -9,7 +9,8 @@ import structlog
 from app.database import get_db
 from app.models.user import User
 from app.models.visit import Visit, VisitSession
-from app.services.backfill import BackfillService
+from app.background.runner import job_runner
+from app.background.jobs.recompute_journey import RecomputeJourney
 from app.utils.auth import get_current_user, require_permission
 
 logger = structlog.get_logger()
@@ -130,16 +131,25 @@ async def rebuild_summaries(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Rebuild pre-computed lead and journey summaries."""
+    """Enqueue recompute jobs for all clients with real form fills."""
     require_permission(current_user, "admin")
-    
+
     try:
-        service = BackfillService()
-        result = service.backfill_all(db, days=days)
+        from datetime import timezone
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+        job = RecomputeJourney()
+        payloads = job.sweep(db, since)
+        enqueued = 0
+        for payload in payloads:
+            ok = await job_runner.enqueue(
+                "recompute_journey", payload, dedup_key=payload.get("client_id")
+            )
+            if ok:
+                enqueued += 1
         return {
             "status": "success",
-            "message": f"Successfully rebuilt {result['journeys']} journeys and {result['leads']} leads.",
-            "details": result
+            "message": f"Enqueued {enqueued} recompute jobs ({len(payloads)} clients found).",
+            "details": {"clients_found": len(payloads), "enqueued": enqueued},
         }
     except Exception as e:
         logger.error("Failed to rebuild summaries", error=str(e))
