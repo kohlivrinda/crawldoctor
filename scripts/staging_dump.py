@@ -70,10 +70,17 @@ def _psql(url: str, sql: str, capture: bool = False) -> str | None:
     return result.stdout if capture else None
 
 
-def dump(source_url: str, days: int, out_path: str) -> None:
-    """Dump the last `days` of data from source into a SQL file."""
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S+00")
-    print(f"Dumping last {days} days (since {cutoff}) to {out_path}")
+def dump(source_url: str, days: int, out_path: str, since: str | None = None) -> None:
+    """Dump the last `days` of data from source into a SQL file.
+
+    If `since` is provided (ISO timestamp), it overrides `days`.
+    """
+    if since:
+        cutoff = since
+        print(f"Dumping since {cutoff} to {out_path}")
+    else:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S+00")
+        print(f"Dumping last {days} days (since {cutoff}) to {out_path}")
 
     with open(out_path, "w") as f:
         # Header
@@ -180,9 +187,89 @@ def load(target_url: str, file_path: str) -> None:
             except RuntimeError:
                 pass
 
-    # Load the dump via psql
-    print("  Loading data...")
-    _run(["psql", target_url, "-v", "ON_ERROR_STOP=1", "-f", file_path])
+    # Load the dump table-by-table — strip BEGIN/COMMIT so each \copy
+    # auto-commits independently instead of one giant transaction.
+    print("  Loading data (per-table commits)...")
+    with open(file_path) as f:
+        content = f.read()
+
+    # Split into per-table blocks by finding \copy ... \. sequences
+    import re
+    # Find: optional comment line, \copy line, data lines, \. terminator
+    pattern = re.compile(
+        r"(-- [^\n]*\n)?"                          # optional comment
+        r"(\\copy\s+\S+[^\n]*\n)"                  # \copy command
+        r"(.*?)"                                    # data
+        r"(\\\.)",                                  # \. terminator
+        re.DOTALL,
+    )
+
+    # Drop FK constraints before loading data — only run DROP statements,
+    # not the ADD statements that appear later in the dump file.
+    alter_stmts = re.findall(r"(ALTER TABLE[^\n]+DROP CONSTRAINT[^\n]+;)", content)
+    for stmt in alter_stmts:
+        print(f"    {stmt[:60]}...")
+        try:
+            _psql(target_url, stmt)
+        except RuntimeError:
+            pass
+
+    # Max rows per COPY chunk — keeps memory pressure on the server manageable.
+    CHUNK_SIZE = 50_000
+
+    # Load each table block, splitting large tables into chunks
+    for match in pattern.finditer(content):
+        block = match.group(0)
+        table_match = re.search(r"\\copy\s+(\S+)", block)
+        table_name = table_match.group(1) if table_match else "unknown"
+
+        # The \copy header line (includes FROM STDIN already)
+        copy_line_match = re.search(r"(\\copy\s+[^\n]+)\n", block)
+        copy_header = copy_line_match.group(1) if copy_line_match else ""
+
+        # Extract data lines: everything between the \copy line and the \. terminator
+        copy_line_end = copy_line_match.end() if copy_line_match else 0
+        data_end = block.rfind("\\.")
+        data_section = block[copy_line_end:data_end]
+        data_lines = [l for l in data_section.split("\n") if l]
+
+        total_rows = len(data_lines)
+        print(f"    Loading {table_name} ({total_rows} rows)...")
+
+        if total_rows == 0:
+            continue
+
+        # Split into chunks to avoid OOM on the server
+        loaded = 0
+        for chunk_start in range(0, total_rows, CHUNK_SIZE):
+            chunk_lines = data_lines[chunk_start:chunk_start + CHUNK_SIZE]
+            # Reuse the original \copy header (already has FROM STDIN clause)
+            chunk_block = copy_header + "\n"
+            chunk_block += "\n".join(chunk_lines) + "\n\\.\n"
+
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".sql", delete=False) as tmp:
+                tmp.write(chunk_block)
+                tmp_path = tmp.name
+            try:
+                _run(["psql", target_url, "-f", tmp_path])
+                loaded += len(chunk_lines)
+                if total_rows > CHUNK_SIZE:
+                    print(f"      {table_name}: {loaded}/{total_rows}")
+            except subprocess.CalledProcessError as e:
+                print(f"      Warning: chunk failed for {table_name} at row {chunk_start}: {e}")
+            finally:
+                os.unlink(tmp_path)
+
+        print(f"    {table_name}: {loaded}/{total_rows} loaded")
+
+    # Re-add FK constraints after all data is loaded
+    add_stmts = re.findall(r"(ALTER TABLE[^\n]+ADD CONSTRAINT[^\n]+;)", content)
+    for stmt in add_stmts:
+        print(f"    {stmt[:60]}...")
+        try:
+            _psql(target_url, stmt)
+        except RuntimeError as e:
+            print(f"    Warning: {e}")
 
     # Quick row counts
     print("  Row counts:")
@@ -195,6 +282,113 @@ def load(target_url: str, file_path: str) -> None:
             print(f"    {table}: (not found)")
 
     print("Done. Staging DB is ready.")
+
+
+def merge(target_url: str, file_path: str) -> None:
+    """Merge a dump file into an existing DB, skipping rows that already exist.
+
+    Unlike `load`, this does NOT truncate — it inserts with ON CONFLICT DO NOTHING
+    so only genuinely new rows are added.  Designed for replaying new traffic into
+    a restored backup.
+    """
+    print(f"Merging {file_path} into DB (ON CONFLICT DO NOTHING)")
+
+    with open(file_path) as f:
+        content = f.read()
+
+    import re
+
+    # Drop FK constraints before merge (same as load) — ignore errors if already dropped
+    drop_stmts = re.findall(r"(ALTER TABLE[^\n]+DROP CONSTRAINT[^\n]+;)", content)
+    for stmt in drop_stmts:
+        print(f"  {stmt[:60]}...")
+        try:
+            _psql(target_url, stmt)
+        except RuntimeError:
+            pass
+
+    # Match blocks like: \copy table (cols) FROM STDIN ... \n<data>\n\.
+    pattern = re.compile(
+        r"\\copy\s+(\w+)\s+\(([^)]+)\)\s+FROM STDIN[^\n]*\n(.*?)\\\\?\.",
+        re.DOTALL,
+    )
+
+    CHUNK_SIZE = 50_000
+
+    for match in pattern.finditer(content):
+        table = match.group(1)
+        columns = match.group(2).strip()
+        csv_block = match.group(3)
+
+        lines = [l for l in csv_block.strip().split("\n") if l.strip()]
+        if not lines:
+            print(f"  {table}: 0 rows — skipping")
+            continue
+
+        total_rows = len(lines)
+        print(f"  {table}: {total_rows} rows")
+
+        tmp_table = f"_tmp_merge_{table}"
+        merged = 0
+
+        for chunk_start in range(0, total_rows, CHUNK_SIZE):
+            chunk_lines = lines[chunk_start:chunk_start + CHUNK_SIZE]
+
+            tmp_csv = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".csv", delete=False, prefix=f"merge_{table}_"
+            )
+            tmp_csv.write("\n".join(chunk_lines) + "\n")
+            tmp_csv.close()
+
+            merge_sql = (
+                f"INSERT INTO {table} ({columns}) "
+                f"SELECT {columns} FROM {tmp_table} "
+                f"ON CONFLICT DO NOTHING;"
+            )
+            script = (
+                f"CREATE TEMP TABLE {tmp_table} (LIKE {table} INCLUDING ALL);\n"
+                f"\\copy {tmp_table} ({columns}) FROM '{tmp_csv.name}' WITH (FORMAT csv)\n"
+                f"{merge_sql}\n"
+                f"DROP TABLE IF EXISTS {tmp_table};\n"
+            )
+
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".sql", delete=False, prefix=f"merge_script_{table}_") as tmp_script:
+                tmp_script.write(script)
+                tmp_script_path = tmp_script.name
+
+            try:
+                _run(["psql", target_url, "-f", tmp_script_path])
+                merged += len(chunk_lines)
+                if total_rows > CHUNK_SIZE:
+                    print(f"      {table}: {merged}/{total_rows}")
+            except subprocess.CalledProcessError as e:
+                print(f"    Warning: chunk failed for {table} at row {chunk_start}: {e}")
+            finally:
+                os.unlink(tmp_csv.name)
+                os.unlink(tmp_script_path)
+
+        print(f"    {table}: {merged}/{total_rows} merged")
+
+    # Re-add FK constraints after all data is loaded
+    add_stmts = re.findall(r"(ALTER TABLE[^\n]+ADD CONSTRAINT[^\n]+;)", content)
+    for stmt in add_stmts:
+        print(f"  {stmt[:60]}...")
+        try:
+            _psql(target_url, stmt)
+        except RuntimeError as e:
+            print(f"    Warning: {e}")
+
+    # Quick row counts
+    print("  Row counts:")
+    for table in TABLES:
+        try:
+            out = _psql(target_url, f"SELECT count(*) FROM {table};", capture=True)
+            count = out.strip().split("\n")[-2].strip() if out else "?"
+            print(f"    {table}: {count}")
+        except RuntimeError:
+            print(f"    {table}: (not found)")
+
+    print("Done. New traffic merged.")
 
 
 def sync(source_url: str, target_url: str, days: int) -> None:
@@ -225,6 +419,7 @@ def main():
     p_dump.add_argument("--source-url", default=os.getenv("CRAWLDOCTOR_DATABASE_URL"),
                         help="Prod database URL (default: $CRAWLDOCTOR_DATABASE_URL)")
     p_dump.add_argument("--days", type=int, default=15, help="Number of days to include (default: 15)")
+    p_dump.add_argument("--since", default=None, help="Absolute UTC cutoff timestamp (overrides --days), e.g. '2026-04-02 01:10:00+00'")
     p_dump.add_argument("--out", default="staging_data.sql", help="Output file path")
 
     # -- load --
@@ -232,6 +427,12 @@ def main():
     p_load.add_argument("--target-url", default=os.getenv("CRAWLDOCTOR_STAGING_DATABASE_URL"),
                         help="Staging database URL (default: $CRAWLDOCTOR_STAGING_DATABASE_URL)")
     p_load.add_argument("--file", required=True, help="Dump file to load")
+
+    # -- merge --
+    p_merge = sub.add_parser("merge", help="Merge a dump into an existing DB (ON CONFLICT DO NOTHING)")
+    p_merge.add_argument("--target-url", default=os.getenv("CRAWLDOCTOR_DATABASE_URL"),
+                         help="Target database URL (default: $CRAWLDOCTOR_DATABASE_URL)")
+    p_merge.add_argument("--file", required=True, help="Dump file to merge")
 
     # -- sync --
     p_sync = sub.add_parser("sync", help="Dump from prod and load into staging in one shot")
@@ -246,12 +447,17 @@ def main():
     if args.command == "dump":
         if not args.source_url:
             parser.error("--source-url required (or set CRAWLDOCTOR_DATABASE_URL)")
-        dump(args.source_url, args.days, args.out)
+        dump(args.source_url, args.days, args.out, since=args.since)
 
     elif args.command == "load":
         if not args.target_url:
             parser.error("--target-url required (or set CRAWLDOCTOR_STAGING_DATABASE_URL)")
         load(args.target_url, args.file)
+
+    elif args.command == "merge":
+        if not args.target_url:
+            parser.error("--target-url required (or set CRAWLDOCTOR_DATABASE_URL)")
+        merge(args.target_url, args.file)
 
     elif args.command == "sync":
         if not args.source_url:
