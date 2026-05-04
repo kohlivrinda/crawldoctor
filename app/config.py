@@ -100,6 +100,15 @@ class Settings(BaseSettings):
         description="List of API keys for external service access to exports"
     )
     export_api_enabled: bool = Field(default=True, description="Enable external API access to exports")
+
+    # IP Enrichment (apilayer ipapi)
+    ipapi_api_key: Optional[str] = Field(default=None, description="apilayer ipapi API key")
+    ip_enrichment_enabled: bool = Field(default=True, description="Enable IP enrichment")
+    ip_enrichment_batch_size: int = Field(default=25, description="IPs per enrichment run (keep low on free plan)")
+    ip_enrichment_ttl_days: int = Field(default=30, description="Days before re-enriching an IP")
+    ip_enrichment_max_rps: float = Field(default=1.0, description="Max API requests per second")
+    ip_enrichment_max_attempts: int = Field(default=3, description="Max enrichment attempts before marking failed")
+    ip_enrichment_interval_minutes: int = Field(default=60, description="Incremental enrichment job interval (minutes)")
     
     class Config:
         env_file = ".env"

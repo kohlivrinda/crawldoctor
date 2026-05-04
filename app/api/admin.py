@@ -11,6 +11,7 @@ from app.models.user import User
 from app.models.visit import Visit, VisitSession
 from app.background.runner import job_runner
 from app.background.jobs.recompute_journey import RecomputeJourney
+from app.services.ip_enrichment import IpEnrichmentService
 from app.utils.auth import get_current_user, require_permission
 
 logger = structlog.get_logger()
@@ -153,5 +154,43 @@ async def rebuild_summaries(
         }
     except Exception as e:
         logger.error("Failed to rebuild summaries", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/enrich-ips")
+async def enrich_ips(
+    max_batches: int = Query(5, ge=1, le=20, description="Max batches to run (each batch = ip_enrichment_batch_size IPs)"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Backfill IP enrichment for historical visitor IPs.
+
+    Capped by max_batches to protect the free-plan monthly quota.
+    Each batch processes up to ip_enrichment_batch_size IPs (default 25).
+    """
+    require_permission(current_user, "admin")
+
+    try:
+        service = IpEnrichmentService()
+        result = service.run_backfill(db, max_batches=max_batches)
+        return {"status": "success", "details": result}
+    except Exception as e:
+        logger.error("Failed to run IP enrichment backfill", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/enrichment-stats")
+async def get_enrichment_stats(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Return IP enrichment coverage metrics."""
+    require_permission(current_user, "admin")
+
+    try:
+        service = IpEnrichmentService()
+        return service.get_coverage_stats(db)
+    except Exception as e:
+        logger.error("Failed to get enrichment stats", error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
 

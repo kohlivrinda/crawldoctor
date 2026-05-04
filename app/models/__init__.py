@@ -5,6 +5,7 @@ from app.models.visit import Visit, VisitSession, VisitEvent
 from app.models.funnel import FunnelConfig
 from app.models.summary import LeadSummary, JourneySummary, JourneyFormFill
 from app.background.models import BackgroundJobState
+from app.models.enrichment import IpEnrichment
 
 __all__ = [
     "User",
@@ -16,4 +17,5 @@ __all__ = [
     "JourneySummary",
     "JourneyFormFill",
     "BackgroundJobState",
+    "IpEnrichment",
 ]
