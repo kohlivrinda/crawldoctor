@@ -1,7 +1,7 @@
 """add_ip_enrichment_table
 
 Revision ID: add_ip_enrichment
-Revises: fix_asn_type
+Revises: f1a2b3c4d5e6
 Create Date: 2026-05-04
 
 """
@@ -9,7 +9,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = 'add_ip_enrichment'
-down_revision = 'fix_asn_type'
+down_revision = 'f1a2b3c4d5e6'
 branch_labels = None
 depends_on = None
 

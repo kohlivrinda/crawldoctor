@@ -14,16 +14,15 @@ from app.models.enrichment import IpEnrichment
 logger = structlog.get_logger()
 
 _PRIVATE_IPS = {"127.0.0.1", "::1", ""}
-_PROVIDER = "ipapi.co"
-_API_BASE = "https://ipapi.co"
+_PROVIDER = "ipapi.is"
+_API_BASE = "https://api.ipapi.is"
 
 
 class IpEnrichmentService:
     """Enriches visitor IPs with company identity and network flags.
 
-    Uses ipapi.co free tier (no API key required, 1k req/day).
-    Security flags (is_proxy, is_tor, etc.) are not available on the free
-    tier and stored as NULL. company_domain is not returned by ipapi.co.
+    Uses ipapi.is (no API key required). Returns company name, domain,
+    type, country, and network flags (is_datacenter, is_vpn, is_proxy, is_tor).
     """
 
     def _clean_str(self, val) -> Optional[str]:
@@ -44,19 +43,21 @@ class IpEnrichmentService:
         return s
 
     def _normalize(self, ip: str, raw: dict, first_seen_at, last_seen_at) -> dict:
-        """Map ipapi.co response to ip_enrichment columns."""
+        """Map ipapi.is response to ip_enrichment columns."""
         now = datetime.now(timezone.utc)
+        company = raw.get("company") or {}
+        location = raw.get("location") or {}
 
         return {
             "ip": ip,
-            "company_domain": None,  # not provided by ipapi.co free tier
-            "company_name": self._clean_str_raw(raw.get("org")),
-            "company_type": None,    # not provided by ipapi.co free tier
-            "country": self._clean_str(raw.get("country_code")),
-            "is_datacenter": None,
-            "is_vpn": None,
-            "is_proxy": None,
-            "is_tor": None,
+            "company_domain": self._clean_str(company.get("domain")),
+            "company_name": self._clean_str_raw(company.get("name")),
+            "company_type": self._clean_str(company.get("type")),
+            "country": self._clean_str(location.get("country_code")),
+            "is_datacenter": raw.get("is_datacenter"),
+            "is_vpn": raw.get("is_vpn"),
+            "is_proxy": raw.get("is_proxy"),
+            "is_tor": raw.get("is_tor"),
             "source": _PROVIDER,
             "enriched_at": now,
             "ttl_expires_at": now + timedelta(days=settings.ip_enrichment_ttl_days),
@@ -69,12 +70,12 @@ class IpEnrichmentService:
         }
 
     def _call_api(self, ip: str) -> dict:
-        """Call ipapi.co for one IP. Returns raw JSON dict.
+        """Call ipapi.is for one IP. Returns raw JSON dict.
 
         Retries up to 3 times with exponential backoff on transient errors.
         Raises ValueError for permanent failures (4xx excl. 429).
         """
-        url = f"{_API_BASE}/{ip}/json/"
+        url = f"{_API_BASE}/?q={ip}"
 
         for attempt in range(3):
             try:

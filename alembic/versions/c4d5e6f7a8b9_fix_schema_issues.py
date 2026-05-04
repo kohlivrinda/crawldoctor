@@ -1,7 +1,7 @@
 """Fix is_bot default, add updated_at to visit_sessions, add FK on journey_form_fills.visit_event_id
 
-Revision ID: c4d5e6f7a8b9
-Revises: b3f1a9c7d820
+Revision ID: f1a2b3c4d5e6
+Revises: c4d5e6f7a8b9
 Create Date: 2026-04-02
 
 """
@@ -9,8 +9,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = 'c4d5e6f7a8b9'
-down_revision = 'b3f1a9c7d820'
+revision = 'f1a2b3c4d5e6'
+down_revision = 'c4d5e6f7a8b9'
 branch_labels = None
 depends_on = None
 
