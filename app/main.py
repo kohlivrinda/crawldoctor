@@ -1,7 +1,7 @@
 """Main FastAPI application for CrawlDoctor."""
 from contextlib import asynccontextmanager
-from datetime import datetime
-from fastapi import FastAPI, Request, Response
+from datetime import datetime, timezone, timedelta
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse
@@ -12,7 +12,8 @@ from pathlib import Path
 import time
 
 from app.config import settings
-from app.database import init_db, close_db
+from app.database import get_db, init_db, close_db
+from sqlalchemy.orm import Session
 from app.api import tracking_router, analytics_router, auth_router, admin_router
 from app.services.auth import AuthService
 from app.services.event_batcher import event_batcher
@@ -326,33 +327,28 @@ async def health_check():
 
 # Metrics endpoint for monitoring
 @app.get("/metrics")
-async def metrics():
+async def metrics(db: Session = Depends(get_db)):
     """Basic metrics endpoint."""
     try:
-        from app.database import SessionLocal
         from app.models.visit import Visit
         from sqlalchemy import func
-        
-        db = SessionLocal()
-        try:
-            total_visits = db.query(func.count(Visit.id)).scalar()
-            recent_visits = db.query(func.count(Visit.id)).filter(
-                Visit.timestamp >= datetime.now().replace(hour=datetime.now().hour - 1)
-            ).scalar()
-            
-            return {
-                "total_visits": total_visits,
-                "recent_visits_1h": recent_visits,
-                "timestamp": datetime.now().isoformat()
-            }
-        finally:
-            db.close()
-            
+
+        now = datetime.now(timezone.utc)
+        total_visits = db.query(func.count(Visit.id)).scalar()
+        recent_visits = db.query(func.count(Visit.id)).filter(
+            Visit.timestamp >= now - timedelta(hours=1)
+        ).scalar()
+
+        return {
+            "total_visits": total_visits,
+            "recent_visits_1h": recent_visits,
+            "timestamp": now.isoformat(),
+        }
     except Exception as e:
         logger.error("Failed to get metrics", error=str(e))
         return {
             "error": "Metrics unavailable",
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
 

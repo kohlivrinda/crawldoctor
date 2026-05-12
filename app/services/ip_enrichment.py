@@ -69,7 +69,7 @@ class IpEnrichmentService:
             "last_seen_at": last_seen_at,
         }
 
-    def _call_api(self, ip: str) -> dict:
+    def _call_api(self, ip: str, client: httpx.Client) -> dict:
         """Call ipapi.is for one IP. Returns raw JSON dict.
 
         Retries up to 3 times with exponential backoff on transient errors.
@@ -79,14 +79,12 @@ class IpEnrichmentService:
 
         for attempt in range(3):
             try:
-                with httpx.Client(timeout=httpx.Timeout(10.0)) as client:
-                    resp = client.get(url)
+                resp = client.get(url)
 
                 if resp.status_code == 200:
                     return resp.json()
 
                 if resp.status_code == 429 or resp.status_code >= 500:
-                    # Transient — backoff and retry
                     wait = 2 ** attempt
                     logger.warning(
                         "ipapi transient error, retrying",
@@ -198,54 +196,55 @@ class IpEnrichmentService:
         stats = {"candidates": len(candidates), "success": 0, "error": 0, "failed": 0}
         min_interval = 1.0 / max(settings.ip_enrichment_max_rps, 0.01)
 
-        for candidate in candidates:
-            ip = candidate["ip"]
-            t0 = time.monotonic()
+        with httpx.Client(timeout=httpx.Timeout(10.0)) as client:
+            for candidate in candidates:
+                ip = candidate["ip"]
+                t0 = time.monotonic()
 
-            try:
-                raw = self._call_api(ip)
-                data = self._normalize(ip, raw, candidate["first_seen_at"], candidate["last_seen_at"])
-                self._upsert(db, data)
-                stats["success"] += 1
-                logger.info("ip enriched", ip=ip, company_domain=data.get("company_domain"))
-            except ValueError as exc:
-                # Permanent API error (4xx)
-                stats["failed"] += 1
-                logger.warning("ip enrichment permanent failure", ip=ip, error=str(exc))
                 try:
-                    self._upsert_error(db, ip, "api_4xx", str(exc),
-                                       candidate["first_seen_at"], candidate["last_seen_at"])
-                except Exception as write_exc:
-                    logger.error("ip enrichment: failed to write error sentinel",
-                                 ip=ip, error=str(write_exc))
+                    raw = self._call_api(ip, client)
+                    data = self._normalize(ip, raw, candidate["first_seen_at"], candidate["last_seen_at"])
+                    self._upsert(db, data)
+                    stats["success"] += 1
+                    logger.info("ip enriched", ip=ip, company_domain=data.get("company_domain"))
+                except ValueError as exc:
+                    # Permanent API error (4xx)
+                    stats["failed"] += 1
+                    logger.warning("ip enrichment permanent failure", ip=ip, error=str(exc))
                     try:
-                        db.rollback()
+                        self._upsert_error(db, ip, "api_4xx", str(exc),
+                                           candidate["first_seen_at"], candidate["last_seen_at"])
+                    except Exception as write_exc:
+                        logger.error("ip enrichment: failed to write error sentinel",
+                                     ip=ip, error=str(write_exc))
+                        try:
+                            db.rollback()
+                        except Exception:
+                            pass
+                except Exception as exc:
+                    # Transient / network error, or DB failure on the success path
+                    stats["error"] += 1
+                    logger.warning("ip enrichment transient error", ip=ip, error=str(exc))
+                    try:
+                        db.rollback()  # clear any failed transaction before writing sentinel
                     except Exception:
                         pass
-            except Exception as exc:
-                # Transient / network error, or DB failure on the success path
-                stats["error"] += 1
-                logger.warning("ip enrichment transient error", ip=ip, error=str(exc))
-                try:
-                    db.rollback()  # clear any failed transaction before writing sentinel
-                except Exception:
-                    pass
-                try:
-                    self._upsert_error(db, ip, "transient", str(exc),
-                                       candidate["first_seen_at"], candidate["last_seen_at"])
-                except Exception as write_exc:
-                    logger.error("ip enrichment: failed to write error sentinel",
-                                 ip=ip, error=str(write_exc))
                     try:
-                        db.rollback()
-                    except Exception:
-                        pass
+                        self._upsert_error(db, ip, "transient", str(exc),
+                                           candidate["first_seen_at"], candidate["last_seen_at"])
+                    except Exception as write_exc:
+                        logger.error("ip enrichment: failed to write error sentinel",
+                                     ip=ip, error=str(write_exc))
+                        try:
+                            db.rollback()
+                        except Exception:
+                            pass
 
-            # Rate limit: sleep for the remainder of the inter-request interval
-            elapsed = time.monotonic() - t0
-            remainder = min_interval - elapsed
-            if remainder > 0:
-                time.sleep(remainder)
+                # Rate limit: sleep for the remainder of the inter-request interval
+                elapsed = time.monotonic() - t0
+                remainder = min_interval - elapsed
+                if remainder > 0:
+                    time.sleep(remainder)
 
         logger.info("ip enrichment batch complete", **stats)
         return stats

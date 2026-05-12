@@ -85,14 +85,15 @@ class EventBatcher:
             db.close()
 
     async def _drain_pending(self) -> None:
-        batch: List[Dict[str, Any]] = []
-        while not self._queue.empty() and len(batch) < self.batch_size:
-            try:
-                batch.append(self._queue.get_nowait())
-            except asyncio.QueueEmpty:
-                break
-        if batch:
-            await asyncio.to_thread(self._flush_batch, batch)
+        while not self._queue.empty():
+            batch: List[Dict[str, Any]] = []
+            while not self._queue.empty() and len(batch) < self.batch_size:
+                try:
+                    batch.append(self._queue.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
+            if batch:
+                await asyncio.to_thread(self._flush_batch, batch)
 
 
 event_batcher = EventBatcher()

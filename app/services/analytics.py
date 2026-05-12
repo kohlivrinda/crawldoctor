@@ -949,7 +949,7 @@ class AnalyticsService:
                 logger.warning(f"Recent activity query timeout, attempt {attempt + 1}/{max_retries}", error=str(e), offset=offset)
                 db.rollback()
                 if attempt < max_retries - 1:
-                    time.sleep(0.5 * (attempt + 1))  # Quick retry with backoff
+                    pass
                 else:
                     logger.error("Failed to get recent activity after retries", error=str(e))
                     # Return empty result on final failure
