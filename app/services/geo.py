@@ -172,7 +172,7 @@ class GeoLocationService:
 
         # Attempt ip-api.com (free tier is HTTP only)
         try:
-            timeout = httpx.Timeout(2.5, read=2.5)
+            timeout = httpx.Timeout(1.0)
             async with httpx.AsyncClient(timeout=timeout) as client:
                 url = f"http://ip-api.com/json/{ip_address}?fields=status,message,country,countryCode,region,regionName,city,zip,lat,lon,timezone,isp,org,as,asname"
                 resp = await client.get(url)
@@ -209,7 +209,7 @@ class GeoLocationService:
 
         # Secondary fallback: ipapi.co
         try:
-            timeout = httpx.Timeout(2.5, read=2.5)
+            timeout = httpx.Timeout(1.0)
             async with httpx.AsyncClient(timeout=timeout) as client:
                 url = f"https://ipapi.co/{ip_address}/json/"
                 resp = await client.get(url)

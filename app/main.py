@@ -5,6 +5,8 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse
+from starlette.datastructures import MutableHeaders
+from starlette.types import ASGIApp, Receive, Scope, Send
 import structlog
 from pathlib import Path
 import time
@@ -115,73 +117,86 @@ app = FastAPI(
 )
 
 
-# Security headers middleware
-@app.middleware("http")
-async def security_headers(request: Request, call_next):
-    """Add security headers to all responses."""
-    response = await call_next(request)
-    
-    # Security headers
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["X-XSS-Protection"] = "1; mode=block"
-    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    
-    # Only add HSTS in production
-    if not settings.debug:
-        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-    
-    return response
+class _SecurityHeadersMiddleware:
+    """Pure ASGI security headers middleware."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers["X-Content-Type-Options"] = "nosniff"
+                headers["X-Frame-Options"] = "DENY"
+                headers["X-XSS-Protection"] = "1; mode=block"
+                headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+                if not settings.debug:
+                    headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
 
 
-# Request logging middleware
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    """Log all requests for monitoring and debugging."""
-    start_time = time.time()
-    
-    # Log request
-    logger.info(
-        "Request received",
-        method=request.method,
-        url=str(request.url),
-        client_ip=request.client.host,
-        user_agent=request.headers.get("user-agent", ""),
-        path=request.url.path
-    )
-    
-    # Process request
-    try:
-        response = await call_next(request)
-        
-        # Calculate processing time
-        process_time = time.time() - start_time
-        
-        # Log response
+class _LogRequestsMiddleware:
+    """Pure ASGI request logging middleware."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        start_time = time.time()
+        request = Request(scope, receive)
+
         logger.info(
-            "Request completed",
+            "Request received",
             method=request.method,
             url=str(request.url),
-            status_code=response.status_code,
-            process_time=f"{process_time:.3f}s"
+            client_ip=request.client.host if request.client else "unknown",
+            user_agent=request.headers.get("user-agent", ""),
+            path=request.url.path,
         )
-        
-        # Add processing time header
-        response.headers["X-Process-Time"] = f"{process_time:.3f}s"
-        
-        return response
-        
-    except Exception as e:
-        process_time = time.time() - start_time
-        logger.error(
-            "Request failed",
-            method=request.method,
-            url=str(request.url),
-            error=str(e),
-            process_time=f"{process_time:.3f}s"
-        )
-        raise
 
+        status_code = 500
+
+        async def send_wrapper(message):
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = message["status"]
+                headers = MutableHeaders(scope=message)
+                headers["X-Process-Time"] = f"{time.time() - start_time:.3f}s"
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_wrapper)
+            logger.info(
+                "Request completed",
+                method=request.method,
+                url=str(request.url),
+                status_code=status_code,
+                process_time=f"{time.time() - start_time:.3f}s",
+            )
+        except Exception as e:
+            logger.error(
+                "Request failed",
+                method=request.method,
+                url=str(request.url),
+                error=str(e),
+                process_time=f"{time.time() - start_time:.3f}s",
+            )
+            raise
+
+
+app.add_middleware(_SecurityHeadersMiddleware)
+app.add_middleware(_LogRequestsMiddleware)
 
 # CORS middleware
 app.add_middleware(
